@@ -1,7 +1,7 @@
 import {
     Block,
     ClassDeclaration, ClassMemberTypes, ExportAssignment,
-    Expression, ExpressionStatement, ForStatement,
+    Expression, ExpressionStatement, ForInStatement, ForOfStatement, ForStatement,
     FunctionDeclaration,
     IfStatement,
     ImportDeclaration,
@@ -66,7 +66,7 @@ function processObjectLiteral(expression: any): string {
         return 'Object()';
     }
     
-    // 生成属性声明
+    // 生成属性声明（使用可选类型，以便在 super.init() 之后赋值）
     const properties = expression.getProperties().map((property: any) => {
         if (Node.isPropertyAssignment(property)) {
             const propName = property.getName();
@@ -84,7 +84,8 @@ function processObjectLiteral(expression: any): string {
                 propType = 'Bool';
             }
             
-            return `public var ${propName}: ${propType}`;
+            // 使用可选类型（Type?），这样可以在 super.init() 后初始化
+            return `public var ${propName}: ${propType}?`;
         }
         return '';
     }).filter(Boolean).join('\n        ');
@@ -121,8 +122,16 @@ function processObjectLiteral(expression: any): string {
         return '';
     }).filter(Boolean).join('\n');
     
+    const propertiesAssignments = expression.getProperties().map((property: any) => {
+        if (Node.isPropertyAssignment(property)) {
+            const propName = property.getName();
+            return `        self.properties["${propName}"] = ${propName}`;
+        }
+        return '';
+    }).filter(Boolean).join('\n');
+    
     const className = `AnonymousObject_${objectLiteralCounter++}`;
-    const classDef = `class ${className}: Object {\n        ${properties}\n        \n        init(${initParams}) {\n${initAssignments}\n            super.init()\n        }\n    }`;
+    const classDef = `class ${className}: Object {\n        ${properties}\n        \n        init(${initParams}) {\n            super.init()\n${initAssignments}\n${propertiesAssignments}\n        }\n    }`;
     anonymousClasses.push(classDef);
     
     // 生成初始化参数
@@ -483,6 +492,10 @@ function parseStatement(statement: Statement): CodeResult {
         return parseIfStatement(statement);
     } else if (Node.isForStatement(statement)) {
         return parseForStatement(statement);
+    } else if (Node.isForOfStatement(statement)) {
+        return parseForOfStatement(statement);
+    } else if (Node.isForInStatement(statement)) {
+        return parseForInStatement(statement);
     } else if (Node.isWhileStatement(statement)) {
         return parseWhileStatement(statement);
     } else if (Node.isReturnStatement(statement)) {
@@ -1042,6 +1055,77 @@ function parseWhileStatement(statement: WhileStatement): CodeResult {
     return {code: `while ${condition} ${bodyCode}`};
 }
 
+function parseForOfStatement(statement: ForOfStatement): CodeResult {
+    const initializer = statement.getInitializer();
+    const expression = statement.getExpression();
+    const body = statement.getStatement();
+    
+    if (!initializer || !expression) {
+        return {code: ''};
+    }
+    
+    let varName = '';
+    // 从 initializer (VariableDeclarationList) 获取变量名
+    const decls = initializer.getDeclarations();
+    if (decls.length > 0) {
+        varName = decls[0].getName();
+    }
+    
+    if (!varName) {
+        return {code: ''};
+    }
+    
+    const exprCode = parseExpression(expression).code;
+    
+    let bodyCode = '';
+    if (body && Node.isBlock(body)) {
+        bodyCode = parseBlock(body as Block).code;
+    } else if (body) {
+        bodyCode = `{ ${parseStatement(body).code} }`;
+    } else {
+        bodyCode = '{}';
+    }
+    
+    // Swift 的 for-in 循环语法：for item in collection { }
+    return {code: `for ${varName} in ${exprCode} ${bodyCode}`};
+}
+
+function parseForInStatement(statement: ForInStatement): CodeResult {
+    const initializer = statement.getInitializer();
+    const expression = statement.getExpression();
+    const body = statement.getStatement();
+    
+    if (!initializer || !expression) {
+        return {code: ''};
+    }
+    
+    let varName = '';
+    // 从 initializer (VariableDeclarationList) 获取变量名
+    const decls = initializer.getDeclarations();
+    if (decls.length > 0) {
+        varName = decls[0].getName();
+    }
+    
+    if (!varName) {
+        return {code: ''};
+    }
+    
+    const exprCode = parseExpression(expression).code;
+    
+    let bodyCode = '';
+    if (body && Node.isBlock(body)) {
+        bodyCode = parseBlock(body as Block).code;
+    } else if (body) {
+        bodyCode = `{ ${parseStatement(body).code} }`;
+    } else {
+        bodyCode = '{}';
+    }
+    
+    // for...in 循环遍历对象的键，需要使用 Object.keys() 方法
+    // Swift 的 for-in 循环语法：for key in Object.keys(object) { }
+    return {code: `for ${varName} in Object.keys(${exprCode}) ${bodyCode}`};
+}
+
 
 function parseExpression(expression?: Expression): CodeResult {
     if (!expression) {
@@ -1121,7 +1205,8 @@ function parseExpression(expression?: Expression): CodeResult {
                 'indexOf': 'firstIndex'
             };
             
-            if (arrayMethodMap[methodName]) {
+            // 使用 hasOwnProperty 检查，避免原型链上的 toString 等方法被匹配
+            if (arrayMethodMap.hasOwnProperty(methodName)) {
                 const swiftMethodName = arrayMethodMap[methodName];
                 
                 // reduce 特殊处理（参数顺序相反）
@@ -1164,6 +1249,7 @@ function parseExpression(expression?: Expression): CodeResult {
     } else if (Node.isPropertyAccessExpression(expression)) {
         let object = parseExpression(expression.getExpression()).code;
         const property = expression.getName();
+        
         // 替换 this 为 self
         if (object === 'this') {
             object = 'self';
@@ -1193,6 +1279,11 @@ function parseExpression(expression?: Expression): CodeResult {
         // 如果属性是字符串或数组的方法/属性，直接返回
         if (stringProperties.includes(property) || arrayMethods.includes(property)) {
             return {code: `${object}.${property}`};
+        }
+        
+        // 对于对象字面量的属性访问（AnonymousObject_*），使用 ?? 提供默认值避免 Optional 包装
+        if (object.startsWith('AnonymousObject_')) {
+            return {code: `${object}.${property} ?? nil`};
         }
         
         // 使用点号访问，而不是下标
@@ -1386,6 +1477,10 @@ function parseNode(node: Node): CodeResult {
         return parseIfStatement(node as IfStatement);
     } else if (Node.isForStatement(node)) {
         return parseForStatement(node as ForStatement);
+    } else if (Node.isForOfStatement(node)) {
+        return parseForOfStatement(node as ForOfStatement);
+    } else if (Node.isForInStatement(node)) {
+        return parseForInStatement(node as ForInStatement);
     } else if (Node.isWhileStatement(node)) {
         return parseWhileStatement(node as WhileStatement);
     } else if (Node.isReturnStatement(node)) {
