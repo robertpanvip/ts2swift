@@ -48,6 +48,52 @@ public struct Number: Equatable, CustomStringConvertible {
     public func toPrecision(_ precision: Int) -> String {
         return String(format: "%.\(precision-1)g", value)
     }
+    
+    // ES6 Number 实例方法
+    public func isNaN() -> Bool {
+        return self.value.isNaN
+    }
+    
+    public func isFinite() -> Bool {
+        return self.value.isFinite
+    }
+    
+    public func isInteger() -> Bool {
+        return self.value.truncatingRemainder(dividingBy: 1) == 0
+    }
+    
+    public func isSafeInteger() -> Bool {
+        return self.value >= -Double(Int64.max) && self.value <= Double(Int64.max) && self.isInteger()
+    }
+}
+
+// ES6 Number 静态方法
+public extension Number {
+    static func isNaN(_ value: Number) -> Bool {
+        return value.value.isNaN
+    }
+    
+    static func isFinite(_ value: Number) -> Bool {
+        return value.value.isFinite
+    }
+    
+    static func isInteger(_ value: Number) -> Bool {
+        return value.value.truncatingRemainder(dividingBy: 1) == 0
+    }
+    
+    static func isSafeInteger(_ value: Number) -> Bool {
+        return value.value >= -Double(Int64.max) && value.value <= Double(Int64.max) && isInteger(value)
+    }
+    
+    // 常量
+    static var MAX_VALUE: Number { Number(Double.greatestFiniteMagnitude) }
+    static var MIN_VALUE: Number { Number(Double.leastNormalMagnitude) }
+    static var NaN: Number { Number(Double.nan) }
+    static var NEGATIVE_INFINITY: Number { Number(-Double.infinity) }
+    static var POSITIVE_INFINITY: Number { Number(Double.infinity) }
+    static var EPSILON: Number { Number(2.220446049250313e-16) }
+    static var MAX_SAFE_INTEGER: Number { Number(Int64.max) }
+    static var MIN_SAFE_INTEGER: Number { Number(-Int64.max) }
 }
 
 // 为 Number 类型添加运算符支持
