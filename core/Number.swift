@@ -1,4 +1,4 @@
-public struct Number {
+public struct Number: Equatable, CustomStringConvertible {
     public let value: Double
     
     public init(_ value: Double) {
@@ -15,6 +15,14 @@ public struct Number {
     
     public init(_ value: Any) {
         self.value = Double(String(describing: value)) ?? 0.0
+    }
+    
+    public var description: String {
+        return String(value)
+    }
+    
+    public static func == (lhs: Number, rhs: Number) -> Bool {
+        return lhs.value == rhs.value
     }
     
     public func toString() -> String {
@@ -58,10 +66,6 @@ public extension Number {
     
     static func / (lhs: Number, rhs: Number) -> Number {
         return Number(lhs.value / rhs.value)
-    }
-    
-    static func == (lhs: Number, rhs: Number) -> Bool {
-        return lhs.value == rhs.value
     }
     
     static func < (lhs: Number, rhs: Number) -> Bool {

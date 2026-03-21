@@ -19,6 +19,7 @@ any       → Any
 void      → Void
 null      → Null (自定义类型)
 undefined → Undefined (自定义类型)
+Symbol    → Symbol (自定义类)
 ```
 
 #### 复合类型
@@ -207,6 +208,10 @@ public enum _ModuleName {
 - Timer 工具类
 - 使用 DispatchSourceTimer 实现
 - 支持 setTimeout/setInterval
+
+#### core/Symbol.swift
+- Symbol 类（符合 ES6 规范）
+- 支持 Symbol.for() 和 Symbol() 创建
 
 ### 9. 类型解析策略
 

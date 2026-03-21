@@ -27,7 +27,9 @@
     "run-interface": "npm run ts-swift ./test/ts/interface.ts",
     "run-generics": "npm run ts-swift ./test/ts/generics.ts",
     "run-exports": "npm run ts-swift ./test/ts/exports.ts",
-    "run-imports": "npm run ts-swift ./test/ts/imports.ts ./test/ts/exports.ts"
+    "run-imports": "npm run ts-swift ./test/ts/imports.ts ./test/ts/exports.ts",
+    "run-symbol": "npm run ts-swift ./test/ts/symbol.ts",
+    "run-modifiers": "npm run ts-swift ./test/ts/modifiers.ts"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

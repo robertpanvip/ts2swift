@@ -56,6 +56,16 @@ let anonymousClasses: string[] = [];
 
 // 处理对象字面量，返回类名
 function processObjectLiteral(expression: any): string {
+    // 检查是否有计算属性名（如 [Symbol()]）
+    const hasComputedProperty = expression.getProperties().some((property: any) => {
+        return Node.isComputedPropertyName(property.getNameNode());
+    });
+    
+    // 如果有计算属性名，返回简单的 Object 初始化
+    if (hasComputedProperty) {
+        return 'Object()';
+    }
+    
     // 生成属性声明
     const properties = expression.getProperties().map((property: any) => {
         if (Node.isPropertyAssignment(property)) {
@@ -519,6 +529,10 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
                 // 获取类名
                 const className = initializer.getExpression().getText();
                 finalTypeStr = className;
+            } else if (Node.isCallExpression(initializer)) {
+                // CallExpression（如 Symbol()），让 Swift 推断类型
+                initializerCode = parseExpression(initializer).code;
+                shouldOmitType = true;
             } else {
                 initializerCode = parseExpression(initializer).code;
             }
@@ -618,6 +632,7 @@ function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
 
 function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
     const isExport = statement.hasModifier(ts.SyntaxKind.ExportKeyword);
+    const isAbstract = statement.hasModifier(ts.SyntaxKind.AbstractKeyword);
     const name = statement.getName() || 'AnonymousClass';
     const members = statement.getMembers();
     
@@ -629,22 +644,31 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
         genericStr = `<${genericParams}>`;
     }
     
-    // 获取实现的接口（protocols）
+    // 获取实现的接口（protocols）和继承的类
     const heritageClauses = statement.getHeritageClauses() || [];
     const implementsTypes: string[] = [];
+    const extendsTypes: string[] = [];
+    
     heritageClauses.forEach(clause => {
-        if (clause.getToken() === ts.SyntaxKind.ImplementsKeyword) {
-            const types = clause.getTypeNodes() || [];
+        const types = clause.getTypeNodes() || [];
+        if (clause.getToken() === ts.SyntaxKind.ExtendsKeyword) {
+            // extends - 继承类
             types.forEach(type => {
-                // 对于协议实现，只使用协议名，不使用类型参数
-                // Swift 会自动推断 associatedtype
+                extendsTypes.push(type.getExpression().getText());
+            });
+        } else if (clause.getToken() === ts.SyntaxKind.ImplementsKeyword) {
+            // implements - 实现协议
+            types.forEach(type => {
                 implementsTypes.push(type.getExpression().getText());
             });
         }
     });
+    
+    // 合并继承类型（Swift 使用 : 分隔）
     let inheritsStr = '';
-    if (implementsTypes.length > 0) {
-        inheritsStr = `: ${implementsTypes.join(', ')}`;
+    const allInherits = [...extendsTypes, ...implementsTypes];
+    if (allInherits.length > 0) {
+        inheritsStr = `: ${allInherits.join(', ')}`;
     }
 
     let properties: string[] = [];
@@ -656,6 +680,8 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             const propName = member.getName();
             const propType = parseType(member.getType());
             const isPrivate = member.hasModifier(ts.SyntaxKind.PrivateKeyword);
+            const isReadonly = member.hasModifier(ts.SyntaxKind.ReadonlyKeyword);
+            const isStatic = member.hasModifier(ts.SyntaxKind.StaticKeyword);
             const initializer = member.getInitializer();
 
             let initStr = '';
@@ -663,12 +689,19 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
                 initStr = ` = ${parseExpression(initializer).code}`;
             }
 
-            properties.push(`${isPrivate ? 'private ' : ''}var ${propName}: ${propType}${initStr}`);
+            // readonly 属性使用 let 而不是 var
+            const varKeyword = isReadonly ? 'let' : 'var';
+            const staticKeyword = isStatic ? 'static ' : '';
+            const accessModifier = isPrivate ? 'private ' : '';
+            properties.push(`${accessModifier}${staticKeyword}${varKeyword} ${propName}: ${propType}${initStr}`);
         } else if (Node.isMethodDeclaration(member)) {
             const methodName = member.getName() || '';
             const parameters = member.getParameters();
             const returnType = member.getReturnType();
             const body = member.getBody();
+            const isStatic = member.hasModifier(ts.SyntaxKind.StaticKeyword);
+            const isAbstract = member.hasModifier(ts.SyntaxKind.AbstractKeyword);
+            const isOverride = member.hasModifier(ts.SyntaxKind.OverrideKeyword);
 
             const params = parameters.map((param: ParameterDeclaration) => {
                 const paramName = param.getName();
@@ -677,9 +710,22 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             }).join(', ');
 
             const returnTypeStr = parseType(returnType);
-            const bodyStr = body ? parseBlock(body as Block).code : '{}';
-
-            methods.push(`func ${methodName}(${params}) -> ${returnTypeStr} ${bodyStr}`);
+            
+            // abstract 方法没有方法体
+            let methodStr = '';
+            if (isAbstract) {
+                // Swift 没有直接的 abstract，使用 protocol 或要求子类实现
+                // 这里我们生成一个空实现，或者可以抛出 fatalError
+                methodStr = `func ${methodName}(${params}) -> ${returnTypeStr} { fatalError("Abstract method ${methodName} not implemented") }`;
+            } else {
+                const bodyStr = body ? parseBlock(body as Block).code : '{}';
+                methodStr = `func ${methodName}(${params}) -> ${returnTypeStr} ${bodyStr}`;
+            }
+            
+            // 添加修饰符
+            const staticKeyword = isStatic ? 'static ' : '';
+            const overrideKeyword = isOverride ? 'override ' : '';
+            methods.push(`${overrideKeyword}${staticKeyword}${methodStr}`);
         } else if (Node.isConstructorDeclaration(member)) {
             const parameters = member.getParameters();
             const body = member.getBody();
@@ -697,9 +743,12 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
     });
 
     const classBody = [...properties, ...initializer, ...methods].join('\n\n');
+    
+    // 抽象类使用注释标记（Swift 没有直接的 abstract 类）
+    const classKeyword = isAbstract ? '/* abstract */ class' : 'class';
 
     return {
-        code: `${isExport ? 'public ' : ''}class ${name}${genericStr}${inheritsStr} {\n${classBody}\n}`
+        code: `${isExport ? 'public ' : ''}${classKeyword} ${name}${genericStr}${inheritsStr} {\n${classBody}\n}`
     };
 }
 
@@ -1045,12 +1094,73 @@ function parseExpression(expression?: Expression): CodeResult {
         const cleanedExpression = expressionPart.replace(/<[^>]+>/g, '');
         return {code: `${cleanedExpression}(${args})`};
     } else if (Node.isCallExpression(expression)) {
-        const callee = parseExpression(expression.getExpression()).code;
+        const callee = expression.getExpression();
         const argsList = expression.getArguments();
-
+        
+        // 检测是否是数组方法调用
+        if (Node.isPropertyAccessExpression(callee)) {
+            const arrayObj = parseExpression(callee.getExpression()).code;
+            const methodName = callee.getName();
+            
+            // 数组方法映射
+            const arrayMethodMap: { [key: string]: string } = {
+                'push': 'push',
+                'pop': 'pop',
+                'shift': 'shift',
+                'unshift': 'unshift',
+                'slice': 'slice',
+                'concat': 'concat',
+                'includes': 'includes',
+                'find': 'find',
+                'findIndex': 'findIndex',
+                'every': 'every',
+                'some': 'some',
+                'reverse': 'reverse',
+                'sort': 'sort',
+                'join': 'join',
+                'indexOf': 'firstIndex'
+            };
+            
+            if (arrayMethodMap[methodName]) {
+                const swiftMethodName = arrayMethodMap[methodName];
+                
+                // reduce 特殊处理（参数顺序相反）
+                if (methodName === 'reduce') {
+                    const [fn, initial] = argsList;
+                    const fnCode = parseExpression(fn as Expression).code;
+                    const initialCode = parseExpression(initial as Expression).code;
+                    return {code: `${arrayObj}.reduceES6(${fnCode}, ${initialCode})`};
+                }
+                
+                // slice 参数转换为 Int
+                if (methodName === 'slice') {
+                    const args = argsList.map(arg => {
+                        const code = parseExpression(arg as Expression).code;
+                        // 将 Number(x) 转换为 Int(x.value)
+                        if (code.startsWith('Number(')) {
+                            return `Int(${code}.value)`;
+                        }
+                        return code;
+                    }).join(', ');
+                    return {code: `${arrayObj}.${swiftMethodName}(${args})`};
+                }
+                
+                const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+                return {code: `${arrayObj}.${swiftMethodName}(${args})`};
+            }
+        }
+        
+        const calleeCode = parseExpression(callee).code;
+        
+        // 处理 Symbol() 调用，转换为 CreateSymbol()
+        if (calleeCode === 'Symbol') {
+            const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+            return {code: `CreateSymbol(${args})`};
+        }
+        
         // 处理函数调用，不使用参数标签（Swift 5.3+ 支持省略参数标签）
         const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
-        return {code: `${callee}(${args})`};
+        return {code: `${calleeCode}(${args})`};
     } else if (Node.isPropertyAccessExpression(expression)) {
         let object = parseExpression(expression.getExpression()).code;
         const property = expression.getName();
@@ -1072,6 +1182,13 @@ function parseExpression(expression?: Expression): CodeResult {
         // 检查是否为数组类型：如果对象是标识符且属性是数组方法，或者对象是数组字面量
         const arrayMethods = ['map', 'filter', 'reduce', 'find', 'sort', 'push', 'pop', 'shift', 'unshift', 'slice', 'splice', 'join', 'reverse', 'forEach'];
         const stringProperties = ['length', 'charAt', 'substring', 'indexOf', 'split', 'replace', 'toUpperCase', 'toLowerCase', 'trim'];
+        
+        // 数组 length 转换为 count
+        if (property === 'length') {
+            // 检查是否是数组的 length 属性（简单判断：对象名包含 arr）
+            // 更好的方法是检查类型，但这里简单处理
+            return {code: `${object}.count`};
+        }
         
         // 如果属性是字符串或数组的方法/属性，直接返回
         if (stringProperties.includes(property) || arrayMethods.includes(property)) {
@@ -1294,6 +1411,7 @@ function parseTypeNode(typeNode: any): string {
     if (typeName === 'void') return 'Void';
     if (typeName === 'null') return 'Any?';
     if (typeName === 'undefined') return 'Any?';
+    if (typeName === 'Symbol') return 'Symbol';
     // 处理数组类型 - 检查是否以 [] 结尾
     if (typeName.endsWith('[]')) {
         const elementTypeName = typeName.slice(0, -2);
@@ -1302,6 +1420,7 @@ function parseTypeNode(typeNode: any): string {
         else if (elementTypeName === 'number') elementType = 'Number';
         else if (elementTypeName === 'boolean') elementType = 'Bool';
         else if (elementTypeName === 'any') elementType = 'Any';
+        else if (elementTypeName === 'Symbol') elementType = 'Symbol';
         else elementType = parseTypeNode({ getText: () => elementTypeName, kind: typeNode.kind });
         return `[${elementType}]`;
     }
@@ -1357,6 +1476,10 @@ function parseType(type: Type): string {
             // 将 __type 替换为 Any
             if (name === '__type') {
                 return 'Any';
+            }
+            // Symbol 类型
+            if (name === 'Symbol') {
+                return 'Symbol';
             }
             return name;
         }

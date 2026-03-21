@@ -1,4 +1,4 @@
-// 扩展Swift的Array类型
+// 扩展 Swift 的 Array 类型
 public extension Array {
     func toString() -> String {
         return "[\(self.map { String(describing: $0) }.joined(separator: ", "))]"
@@ -12,29 +12,31 @@ public extension Array {
         return self.count
     }
     
-    func push(_ element: Element) -> Int {
-        var mutableSelf = self
-        mutableSelf.append(element)
-        return mutableSelf.count
+    // ES6: arr.push(item) - 返回新长度
+    mutating func push(_ element: Element) -> Int {
+        self.append(element)
+        return self.count
     }
     
-    func pop() -> Element? {
-        var mutableSelf = self
-        return mutableSelf.popLast()
+    // ES6: arr.pop() - 返回被删除的元素
+    mutating func pop() -> Element? {
+        return self.popLast()
     }
     
-    func shift() -> Element? {
-        var mutableSelf = self
-        return mutableSelf.removeFirst()
+    // ES6: arr.shift() - 返回被删除的第一个元素
+    mutating func shift() -> Element? {
+        guard !self.isEmpty else { return nil }
+        return self.removeFirst()
     }
     
-    func unshift(_ element: Element) -> Int {
-        var mutableSelf = self
-        mutableSelf.insert(element, at: 0)
-        return mutableSelf.count
+    // ES6: arr.unshift(item) - 返回新长度
+    mutating func unshift(_ element: Element) -> Int {
+        self.insert(element, at: 0)
+        return self.count
     }
     
-    func slice(start: Int, end: Int? = nil) -> Array {
+    // ES6: arr.slice(start, end)
+    func slice(_ start: Int, _ end: Int? = nil) -> Array {
         let startIndex = Swift.max(0, start)
         if let end = end {
             let endIndex = Swift.min(self.count, end)
@@ -44,6 +46,57 @@ public extension Array {
         }
     }
     
+    // ES6: arr.concat(arr2)
+    func concat(_ other: [Element]) -> [Element] {
+        return self + other
+    }
+    
+    // ES6: arr.includes(value)
+    func includes(_ element: Element) -> Bool where Element: Equatable {
+        return self.contains(element)
+    }
+    
+    // ES6: arr.find(predicate)
+    func find(_ predicate: @escaping (Element) -> Bool) -> Element? {
+        return self.first(where: predicate)
+    }
+    
+    // ES6: arr.findIndex(predicate)
+    func findIndex(_ predicate: @escaping (Element) -> Bool) -> Int? {
+        return self.firstIndex(where: predicate)
+    }
+    
+    // ES6: arr.every(predicate)
+    func every(_ predicate: @escaping (Element) -> Bool) -> Bool {
+        return self.allSatisfy(predicate)
+    }
+    
+    // ES6: arr.some(predicate)
+    func some(_ predicate: @escaping (Element) -> Bool) -> Bool {
+        return self.contains(where: predicate)
+    }
+    
+    // ES6: arr.reverse() - 返回新数组
+    func reverse() -> Array {
+        return Array(self.reversed())
+    }
+    
+    // ES6: arr.sort() - 返回新数组
+    func sort() -> Array where Element: Comparable {
+        return self.sorted()
+    }
+    
+    // ES6: arr.join(separator)
+    func join(_ separator: String = ",") -> String where Element: CustomStringConvertible {
+        return self.map { $0.description }.joined(separator: separator)
+    }
+    
+    // ES6: arr.reduce(callback, initial) - 参数顺序与 Swift 相反
+    func reduceES6<T>(_ callback: @escaping (T, Element) -> T, _ initial: T) -> T {
+        return self.reduce(initial) { callback($0, $1) }
+    }
+    
+    // 便捷方法
     func splice(start: Int, deleteCount: Int? = nil, elements: Element...) -> Array {
         var mutableSelf = self
         let startIndex = Swift.max(0, start)
@@ -55,18 +108,7 @@ public extension Array {
         return removedElements
     }
     
-    func join(separator: String = ",") -> String {
-        return self.map { String(describing: $0) }.joined(separator: separator)
-    }
-    
-    func reverse() -> Array {
-        return Array(self.reversed())
-    }
-    
-    func sort(by comparator: (Element, Element) -> Bool) -> Array {
-        return self.sorted(by: comparator)
-    }
-    
+    // 兼容旧的 API
     func jsForEach(_ body: (Element) -> Void) {
         Swift.Array(self).forEach(body)
     }
