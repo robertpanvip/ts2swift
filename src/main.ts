@@ -14,7 +14,10 @@ import {
     Type, TypeAliasDeclaration,
     VariableDeclaration,
     VariableDeclarationKind, VariableStatement,
-    WhileStatement
+    WhileStatement,
+    SwitchStatement,
+    DoWhileStatement,
+    TryStatement
 } from "ts-morph";
 import {
     isFunctionType,
@@ -498,6 +501,12 @@ function parseStatement(statement: Statement): CodeResult {
         return parseForInStatement(statement);
     } else if (Node.isWhileStatement(statement)) {
         return parseWhileStatement(statement);
+    } else if (Node.isDoStatement(statement)) {
+        return parseDoWhileStatement(statement);
+    } else if (Node.isSwitchStatement(statement)) {
+        return parseSwitchStatement(statement);
+    } else if (Node.isTryStatement(statement)) {
+        return parseTryStatement(statement);
     } else if (Node.isReturnStatement(statement)) {
         return parseReturnStatement(statement);
     } else if (Node.isExportAssignment(statement)) {
@@ -1055,6 +1064,115 @@ function parseWhileStatement(statement: WhileStatement): CodeResult {
     return {code: `while ${condition} ${bodyCode}`};
 }
 
+function parseDoWhileStatement(statement: DoStatement): CodeResult {
+    const condition = parseExpression(statement.getExpression()).code;
+    const body = statement.getStatement();
+    
+    let bodyCode = '';
+    if (body && Node.isBlock(body)) {
+        bodyCode = parseBlock(body as Block).code;
+    } else if (body) {
+        bodyCode = `{ ${parseStatement(body).code} }`;
+    } else {
+        bodyCode = '{}';
+    }
+    
+    // Swift 使用 repeat-while 语法
+    return {code: `repeat ${bodyCode} while ${condition}`};
+}
+
+function parseSwitchStatement(statement: SwitchStatement): CodeResult {
+    const expression = parseExpression(statement.getExpression()).code;
+    const clauses = statement.getCaseBlock().getClauses();
+    
+    let switchCode = `switch ${expression} {\n`;
+    
+    for (const clause of clauses) {
+        if (Node.isCaseClause(clause)) {
+            const caseValue = parseExpression(clause.getExpression()).code;
+            const statements = clause.getStatements();
+            let caseBody = '';
+            for (const stmt of statements) {
+                const stmtCode = parseStatement(stmt).code;
+                if (stmtCode) {
+                    caseBody += `    ${stmtCode}\n`;
+                }
+            }
+            switchCode += `case ${caseValue}:\n${caseBody}`;
+        } else if (Node.isDefaultClause(clause)) {
+            const statements = clause.getStatements();
+            let defaultBody = '';
+            for (const stmt of statements) {
+                const stmtCode = parseStatement(stmt).code;
+                if (stmtCode) {
+                    defaultBody += `    ${stmtCode}\n`;
+                }
+            }
+            switchCode += `default:\n${defaultBody}`;
+        }
+    }
+    
+    switchCode += '}';
+    return {code: switchCode};
+}
+
+function parseTryStatement(statement: TryStatement): CodeResult {
+    const tryBlock = statement.getTryBlock();
+    const catchClause = statement.getCatchClause();
+    const finallyBlock = statement.getFinallyBlock();
+    
+    let tryCode = 'do {\n';
+    const tryStatements = tryBlock.getStatements();
+    for (const stmt of tryStatements) {
+        const stmtCode = parseStatement(stmt).code;
+        if (stmtCode) {
+            tryCode += `    ${stmtCode}\n`;
+        }
+    }
+    tryCode += '}';
+    
+    // 处理 catch
+    if (catchClause) {
+        const catchVar = catchClause.getVariableDeclaration();
+        const catchBlock = catchClause.getBlock();
+        
+        if (catchVar) {
+            const varName = catchVar.getName();
+            tryCode += ` catch {\n`;
+            tryCode += `    let ${varName} = error\n`;
+        } else {
+            tryCode += ` catch {\n`;
+        }
+        
+        const catchStatements = catchBlock.getStatements();
+        for (const stmt of catchStatements) {
+            const stmtCode = parseStatement(stmt).code;
+            if (stmtCode) {
+                tryCode += `    ${stmtCode}\n`;
+            }
+        }
+        tryCode += '}';
+    }
+    
+    // 处理 finally - Swift 没有 finally，使用 defer 模拟
+    if (finallyBlock) {
+        // 将 finally 块包装在 defer 中，放在 try-catch 之前
+        let finallyCode = 'defer {\n';
+        const finallyStatements = finallyBlock.getStatements();
+        for (const stmt of finallyStatements) {
+            const stmtCode = parseStatement(stmt).code;
+            if (stmtCode) {
+                finallyCode += `    ${stmtCode}\n`;
+            }
+        }
+        finallyCode += '}\n';
+        // 将 defer 放在 try-catch 之前
+        tryCode = finallyCode + tryCode;
+    }
+    
+    return {code: tryCode};
+}
+
 function parseForOfStatement(statement: ForOfStatement): CodeResult {
     const initializer = statement.getInitializer();
     const expression = statement.getExpression();
@@ -1170,11 +1288,19 @@ function parseExpression(expression?: Expression): CodeResult {
 
         return {code: `${left} ${swiftOperator} ${right}`};
     } else if (Node.isNewExpression(expression)) {
-        // 处理new表达式，在Swift中不需要new关键字
+        // 处理 new 表达式，在 Swift 中不需要 new 关键字
         const expressionPart = parseExpression(expression.getExpression()).code;
         const argsList = expression.getArguments();
+        
+        // 特殊处理 RegExp 构造函数
+        if (expressionPart === 'RegExp') {
+            const pattern = argsList.length > 0 ? parseExpression(argsList[0] as Expression).code : '""';
+            const flags = argsList.length > 1 ? parseExpression(argsList[1] as Expression).code : '""';
+            return {code: `RegExp(${pattern}, flags: ${flags})`};
+        }
+        
         const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
-        // 移除泛型参数，Swift会自动推断
+        // 移除泛型参数，Swift 会自动推断
         const cleanedExpression = expressionPart.replace(/<[^>]+>/g, '');
         return {code: `${cleanedExpression}(${args})`};
     } else if (Node.isCallExpression(expression)) {

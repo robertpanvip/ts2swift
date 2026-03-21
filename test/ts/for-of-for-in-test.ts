@@ -1,5 +1,4 @@
 // for...of 和 for...in 测试
-
 // for...of 测试
 const arr: number[] = [1, 2, 3, 4, 5];
 
