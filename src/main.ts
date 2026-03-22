@@ -789,7 +789,16 @@ function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
     
     // 获取泛型参数
     const typeParameters = statement.getTypeParameters() || [];
-    const genericParams = typeParameters.map(tp => tp.getName()).join(', ');
+    const genericParams = typeParameters.map(tp => {
+        const tpName = tp.getName();
+        const constraint = tp.getConstraint();
+        if (constraint) {
+            // 处理泛型约束 T extends SomeType
+            const constraintType = parseType(constraint);
+            return `${tpName}: ${constraintType}`;
+        }
+        return tpName;
+    }).join(', ');
     let genericStr = '';
     if (genericParams) {
         genericStr = `<${genericParams}>`;
@@ -904,7 +913,15 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             const params = parameters.map((param: ParameterDeclaration) => {
                 const paramName = param.getName();
                 const paramType = parseType(param.getType());
-                return `_ ${paramName}: ${paramType}`;
+                const initializer = param.getInitializer();
+                
+                // 处理默认参数
+                let paramStr = `_ ${paramName}: ${paramType}`;
+                if (initializer) {
+                    const defaultVal = parseExpression(initializer).code;
+                    paramStr += ` = ${defaultVal}`;
+                }
+                return paramStr;
             }).join(', ');
 
             const returnTypeStr = parseType(returnType);
@@ -922,7 +939,28 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             
             // 添加修饰符
             const staticKeyword = isStatic ? 'static ' : '';
-            const overrideKeyword = isOverride ? 'override ' : '';
+            // 检测是否需要 override 关键字
+            // 只有当方法在父类中存在时才需要 override
+            let needsOverride = isOverride;
+            if (!needsOverride) {
+                const parentClass = (statement as any).getExtends();
+                if (parentClass) {
+                    // 检查父类是否有同名方法
+                    const parentClassName = parentClass.getExpression ? parentClass.getExpression().getText() : parentClass.getText();
+                    // 简单判断：如果类有父类且方法名不是 init，则可能需要 override
+                    // 但这不够准确，最好检查父类的方法列表
+                    const parentClassDecl = parentClass.getSymbol()?.getDeclarations()?.[0];
+                    if (parentClassDecl) {
+                        const parentMembers = parentClassDecl.getMembers ? parentClassDecl.getMembers() : [];
+                        const hasMethodInParent = parentMembers.some((m: any) => {
+                            const mName = m.getName ? m.getName() : '';
+                            return mName === methodName && !m.isConstructor?.();
+                        });
+                        needsOverride = hasMethodInParent;
+                    }
+                }
+            }
+            const overrideKeyword = needsOverride ? 'override ' : '';
             methods.push({
                 code: `${overrideKeyword}${staticKeyword}${methodCode}`,
                 indentLevel: 1  // class 成员需要 1 级缩进
@@ -1548,8 +1586,16 @@ function parseExpression(expression?: Expression): CodeResult {
             return {code: `${operandCode} -= Number(1)`};
         }
         return {code: operandCode};
+    } else if (Node.isBigIntLiteral(expression)) {
+        // bigint 字面量（以 n 结尾），如 123n
+        const literalText = expression.getText();
+        // 移除 n 后缀并转换为 BigInt
+        const value = literalText.slice(0, -1);
+        return {code: `BigInt(${value})`};
     } else if (Node.isNumericLiteral(expression)) {
-        return {code: `Number(${expression.getLiteralValue()})`};
+        // 普通数字字面量
+        const literalValue = expression.getLiteralValue();
+        return {code: `Number(${literalValue})`};
     } else if (expression.getKind() === ts.SyntaxKind.TrueKeyword || expression.getKind() === ts.SyntaxKind.FalseKeyword) {
         return {code: expression.getText()};
     } else if (Node.isBinaryExpression(expression)) {
@@ -1798,16 +1844,38 @@ function parseExpression(expression?: Expression): CodeResult {
 
         // 使用 Swift 的字符串插值
         let swiftString = '"';
-        swiftString += head.replace(/"/g, '\\"');
+        // 处理头部，转义特殊字符
+        swiftString += head
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/\t/g, '\\t');
         spans.forEach((span) => {
             const expressionCode = parseExpression(span.getExpression()).code;
             const literal = span.getLiteral().getLiteralText();
             swiftString += `\\(${expressionCode})`;
-            swiftString += literal.replace(/"/g, '\\"');
+            // 处理每个 span 后的文本
+            swiftString += literal
+                .replace(/\\/g, '\\\\')
+                .replace(/"/g, '\\"')
+                .replace(/\n/g, '\\n')
+                .replace(/\r/g, '\\r')
+                .replace(/\t/g, '\\t');
         });
         swiftString += '"';
 
         return {code: swiftString};
+    } else if (Node.isNoSubstitutionTemplateLiteral(expression)) {
+        // 处理没有插值的模板字符串（单行或多行）
+        const text = expression.getLiteralText();
+        const escaped = text
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/\t/g, '\\t');
+        return {code: `"${escaped}"`};
     } else if (Node.isTypeOfExpression(expression)) {
         const expr = parseExpression(expression.getExpression()).code;
         return {code: `String(describing: type(of: ${expr}))`};
@@ -1943,8 +2011,14 @@ function parseNode(node: Node): CodeResult {
 }
 
 function parseTypeNode(typeNode: any): string {
+    // 处理条件类型（T extends U ? X : Y）
+    if (typeNode.kind === ts.SyntaxKind.ConditionalType || (typeNode.getKindName && typeNode.getKindName() === 'ConditionalType')) {
+        // Swift 没有直接的条件类型，转换为 Any
+        return 'Any';
+    }
+    
     // 处理联合类型（如 number | undefined）
-    if (typeNode.kind === ts.SyntaxKind.UnionType || typeNode.getKindName() === 'UnionType') {
+    if (typeNode.kind === ts.SyntaxKind.UnionType || (typeNode.getKindName && typeNode.getKindName() === 'UnionType')) {
         // 尝试使用 getTypes 方法获取联合类型的各个成员
         if (typeof typeNode.getTypes === 'function') {
             const types = typeNode.getTypes();
@@ -1986,6 +2060,13 @@ function parseTypeNode(typeNode: any): string {
     }
     
     const typeName = typeNode.getText();
+    // 处理 readonly 数组/元组
+    if (typeName.startsWith('readonly ')) {
+        // 移除 readonly 前缀，按普通数组/元组处理
+        const innerTypeName = typeName.substring(9); // 'readonly '.length = 9
+        // 递归调用，但不带 readonly
+        return parseTypeNode({ getText: () => innerTypeName, kind: typeNode.kind });
+    }
     // 处理基本类型
     if (typeName === 'string') return 'String';
     if (typeName === 'number') return 'Number';
@@ -1996,6 +2077,7 @@ function parseTypeNode(typeNode: any): string {
     if (typeName === 'null') return 'Any';
     if (typeName === 'undefined') return 'Any';
     if (typeName === 'Symbol') return 'Symbol';
+    if (typeName === 'bigint') return 'BigInt';
     // 处理元组类型 - 检查是否是 [type1, type2, ...] 格式
     if (typeName.startsWith('[') && typeName.endsWith(']') && typeName.includes(',')) {
         // 移除方括号并分割类型
@@ -2035,52 +2117,58 @@ function parseTypeNode(typeNode: any): string {
 }
 
 function parseType(type: Type): string {
-    if (type.isNumber() || type.isNumberLiteral()) {
-        return 'Number';
-    } else if (type.isString() || type.isStringLiteral()) {
-        return 'String';
-    } else if (type.isBoolean() || type.isBooleanLiteral()) {
-        return 'Bool';
-    } else if (type.isNull() || type.isUndefined()) {
-        return 'Any?';
-    } else if (type.isVoid()) {
-        return 'Void';
-    } else if (type.isAny() || type.isUnknown()) {
-        return 'Any';
-    } else if (type.isArray()) {
-        const elementType = parseType(type.getArrayElementType()!);
-        return `[${elementType}]`;
-    } else if (isFunctionType(type)) {
-        const callSignature = type.getCallSignatures()[0];
-        if (!callSignature) {
-            return '() -> Any';
+    try {
+        if (type.isNumber?.() || type.isNumberLiteral?.()) {
+            return 'Number';
+        } else if (type.isString?.() || type.isStringLiteral?.()) {
+            return 'String';
+        } else if (type.isBoolean?.() || type.isBooleanLiteral?.()) {
+            return 'Bool';
+        } else if (type.isNull?.() || type.isUndefined?.()) {
+            return 'Any?';
+        } else if (type.isVoid?.()) {
+            return 'Void';
+        } else if (type.isAny?.() || type.isUnknown?.()) {
+            return 'Any';
+        } else if (type.isArray?.()) {
+            const elementType = parseType(type.getArrayElementType()!);
+            return `[${elementType}]`;
+        } else if (isFunctionType(type)) {
+            const callSignature = type.getCallSignatures()?.[0];
+            if (!callSignature) {
+                return '() -> Any';
+            }
+            const parameters = callSignature.getParameters() || [];
+            const paramTypes = parameters.map(param => {
+                try {
+                    return parseType(param.getType());
+                } catch {
+                    return 'Any';
+                }
+            }).join(', ');
+            const returnType = parseType(callSignature.getReturnType() || type);
+            return `(${paramTypes}) -> ${returnType}`;
+        } else {
+            // 检查是否有 symbol（类、接口等）
+            const symbol = type.getSymbol?.() || type.getAliasSymbol?.();
+            if (symbol) {
+                const name = symbol.getName();
+                // 将 __type 替换为 Any
+                if (name === '__type') {
+                    return 'Any';
+                }
+                // Symbol 类型
+                if (name === 'Symbol') {
+                    return 'Symbol';
+                }
+                return name;
+            }
+            // 其他对象类型返回 Any
+            return 'Any';
         }
-        const parameters = callSignature.getParameters() || [];
-        const paramTypes = parameters.map(param => {
-            try {
-                return parseType(param.getType());
-            } catch {
-                return 'Any';
-            }
-        }).join(', ');
-        const returnType = parseType(callSignature.getReturnType() || type);
-        return `(${paramTypes}) -> ${returnType}`;
-    } else {
-        // 检查是否有 symbol（类、接口等）
-        const symbol = type.getSymbol() || type.getAliasSymbol();
-        if (symbol) {
-            const name = symbol.getName();
-            // 将 __type 替换为 Any
-            if (name === '__type') {
-                return 'Any';
-            }
-            // Symbol 类型
-            if (name === 'Symbol') {
-                return 'Symbol';
-            }
-            return name;
-        }
-        // 其他对象类型返回 Any
+    } catch (error) {
+        // 如果类型解析失败，返回 Any
+        console.log(`Type parse error: ${error}`);
         return 'Any';
     }
 }
