@@ -129,6 +129,23 @@ public extension Number {
     static func >= (lhs: Number, rhs: Number) -> Bool {
         return lhs.value >= rhs.value
     }
+    
+    // 复合赋值运算符
+    static func += (lhs: inout Number, rhs: Number) {
+        lhs = Number(lhs.value + rhs.value)
+    }
+    
+    static func -= (lhs: inout Number, rhs: Number) {
+        lhs = Number(lhs.value - rhs.value)
+    }
+    
+    static func *= (lhs: inout Number, rhs: Number) {
+        lhs = Number(lhs.value * rhs.value)
+    }
+    
+    static func /= (lhs: inout Number, rhs: Number) {
+        lhs = Number(lhs.value / rhs.value)
+    }
 }
 
 // Number 与 Int 的比较运算符

@@ -1,34 +1,39 @@
 import {
     Block,
-    ClassDeclaration, ClassMemberTypes, ExportAssignment,
-    Expression, ExpressionStatement, ForInStatement, ForOfStatement, ForStatement,
+    ClassDeclaration,
+    ClassMemberTypes,
+    DoStatement,
+    ExportAssignment,
+    Expression,
+    ExpressionStatement,
+    ForInStatement,
+    ForOfStatement,
+    ForStatement,
     FunctionDeclaration,
     IfStatement,
     ImportDeclaration,
-    InterfaceDeclaration, Node,
+    InterfaceDeclaration,
+    Node,
     ParameterDeclaration,
+    PostfixUnaryExpression,
     Project,
-    ReturnStatement, SourceFile,
+    ReturnStatement,
+    SourceFile,
     Statement,
-    ts,
-    Type, TypeAliasDeclaration,
-    VariableDeclaration,
-    VariableDeclarationKind, VariableStatement,
-    WhileStatement,
     SwitchStatement,
-    DoWhileStatement,
-    TryStatement, DoStatement
+    TryStatement,
+    ts,
+    Type,
+    TypeAliasDeclaration,
+    VariableDeclaration,
+    VariableDeclarationKind,
+    VariableStatement,
+    WhileStatement
 } from "ts-morph";
-import {
-    isFunctionType,
-    cleanOutputDir,
-    mergeCoreFiles,
-    generatePackageSwift,
-    generateOutput
-} from "./helper";
+import {cleanOutputDir, generateOutput, generatePackageSwift, isFunctionType, mergeCoreFiles} from "./helper";
 import path from 'node:path';
 import * as fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import {fileURLToPath} from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1070,11 +1075,15 @@ function parseForStatement(statement: ForStatement): CodeResult {
             const operand = postfixExpr.getOperand();
             const operandCode = parseExpression(operand).code;
             const operatorToken = postfixExpr.getOperatorToken();
-            const operatorKind = operatorToken ? (operatorToken as any).kind : -1;
-            if (operatorKind === ts.SyntaxKind.PlusPlusToken) {
+            // operatorToken 直接就是 token 的 kind 值（数字）
+            const tokenKind = operatorToken as any;
+            // ts.SyntaxKind.PlusPlusToken = 46, ts.SyntaxKind.MinusMinusToken = 47
+            if (tokenKind === ts.SyntaxKind.PlusPlusToken) {
                 incrementCode = `${operandCode} += Number(1)`;
-            } else if (operatorKind === ts.SyntaxKind.MinusMinusToken) {
+            } else if (tokenKind === ts.SyntaxKind.MinusMinusToken) {
                 incrementCode = `${operandCode} -= Number(1)`;
+            } else {
+                incrementCode = parseExpression(incrementor).code;
             }
         } else {
             incrementCode = parseExpression(incrementor).code;
@@ -1339,15 +1348,15 @@ function parseExpression(expression?: Expression): CodeResult {
         return {code: `"${escaped}"`};
     } else if (expression.getKind() === ts.SyntaxKind.PostfixUnaryExpression) {
         // 处理 ++ 和 -- 运算符（Swift 不支持，转换为 += 1 或 -= 1）
-        const operand = (expression as any).getOperand();
+        const operand = (expression as PostfixUnaryExpression).getOperand();
         const operandCode = parseExpression(operand).code;
-        const operatorToken = (expression as any).getOperatorToken();
-        // 使用 ts.Node 的属性访问
-        const operatorKind = operatorToken ? (operatorToken as any).kind : -1;
-        if (operatorKind === ts.SyntaxKind.PlusPlusToken) {
-            return {code: `${operandCode} += 1`};
-        } else if (operatorKind === ts.SyntaxKind.MinusMinusToken) {
-            return {code: `${operandCode} -= 1`};
+        // operatorToken 直接就是 token 的 kind 值（数字）
+        const tokenKind = (expression as PostfixUnaryExpression).getOperatorToken();
+        // ts.SyntaxKind.PlusPlusToken = 46, ts.SyntaxKind.MinusMinusToken = 47
+        if (tokenKind === ts.SyntaxKind.PlusPlusToken) {
+            return {code: `${operandCode} += Number(1)`};
+        } else if (tokenKind === ts.SyntaxKind.MinusMinusToken) {
+            return {code: `${operandCode} -= Number(1)`};
         }
         return {code: operandCode};
     } else if (Node.isNumericLiteral(expression)) {
@@ -1582,7 +1591,7 @@ function parseExpression(expression?: Expression): CodeResult {
         // 使用 Swift 的字符串插值
         let swiftString = '"';
         swiftString += head.replace(/"/g, '\\"');
-        spans.forEach((span, index) => {
+        spans.forEach((span) => {
             const expressionCode = parseExpression(span.getExpression()).code;
             const literal = span.getLiteral().getLiteralText();
             swiftString += `\\(${expressionCode})`;
