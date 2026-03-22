@@ -17,7 +17,7 @@ import {
     WhileStatement,
     SwitchStatement,
     DoWhileStatement,
-    TryStatement
+    TryStatement, DoStatement
 } from "ts-morph";
 import {
     isFunctionType,
@@ -61,7 +61,9 @@ let anonymousClasses: string[] = [];
 function processObjectLiteral(expression: any): string {
     // 检查是否有计算属性名（如 [Symbol()]）
     const hasComputedProperty = expression.getProperties().some((property: any) => {
-        return Node.isComputedPropertyName(property.getNameNode());
+        // 简单检查：如果属性名以 '[' 开头，则是计算属性
+        const propName = property.getName ? property.getName() : '';
+        return propName.startsWith('[');
     });
     
     // 如果有计算属性名，返回简单的 Object 初始化
@@ -473,7 +475,11 @@ function generateSwiftCode(sourceFile: SourceFile, fileName: string): string {
     
     // 组合代码（不包括类，因为它们已经在 enum 内部）
     const allDeclarations = [...protocolDeclarations, ...enumDeclarations, ...anonymousClasses].join('\n\n');
-    return `${uniqueImports.join('\n')}\n\n${moduleCode}\n${allDeclarations}\n\n`;
+    
+    // 添加辅助函数
+    const helperFunctions = generateGetTypeNameHelper();
+    
+    return `${uniqueImports.join('\n')}\n\n${helperFunctions}\n${moduleCode}\n${allDeclarations}\n\n`;
 }
 
 function parseStatement(statement: Statement): CodeResult {
@@ -523,7 +529,12 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
     const declarationKind = statement.getDeclarationList().getDeclarationKind();
 
     const variableDeclarations = declarations.map((declaration: VariableDeclaration) => {
-        const name = declaration.getName();
+        let name = declaration.getName();
+        // 检查是否是 Swift 关键字，如果是则添加反引号
+        const swiftKeywords = ['nil', 'var', 'let', 'class', 'func', 'if', 'else', 'switch', 'case', 'default', 'do', 'while', 'for', 'in', 'return', 'break', 'continue', 'throw', 'try', 'catch', 'guard', 'where', 'is', 'as', 'super', 'self', 'init', 'deinit', 'typealias', 'struct', 'enum', 'extension', 'protocol', 'associatedtype', 'operator', 'precedencegroup', 'rethrows', 'defer', 'repeat', 'some', 'any', 'Type', 'Self'];
+        if (swiftKeywords.includes(name)) {
+            name = `\`${name}\``;
+        }
         // 优先使用显式类型注解，如果没有则使用推断的类型
         const typeNode = declaration.getTypeNode();
         const type = typeNode ? declaration.getType() : declaration.getType();
@@ -968,11 +979,48 @@ function parseIfStatement(statement: IfStatement): CodeResult {
     const condition = parseExpression(statement.getExpression()).code;
     const thenStatement = statement.getThenStatement();
     
+    // 检测类型缩窄：检查条件中是否有 typeof 或 instanceof
+    let narrowedVarName = '';
+    let narrowedType = '';
+    
+    const conditionExpr = statement.getExpression();
+    if (Node.isBinaryExpression(conditionExpr)) {
+        const left = conditionExpr.getLeft();
+        const right = conditionExpr.getRight();
+        const operator = conditionExpr.getOperatorToken().getText();
+        
+        // 处理 typeof x === 'string' 这种情况
+        if ((operator === '===' || operator === '==') && Node.isTypeOfExpression(conditionExpr.getLeft())) {
+            const typeOfExpr = conditionExpr.getLeft() as any;
+            const operand = typeOfExpr.getExpression();
+            if (Node.isIdentifier(operand)) {
+                narrowedVarName = operand.getText();
+                const typeString = (right as any).getLiteralValue ? (right as any).getLiteralValue() : '';
+                narrowedType = typeString;
+            }
+        } else if ((operator === '===' || operator === '==') && Node.isTypeOfExpression(conditionExpr.getRight())) {
+            const typeOfExpr = conditionExpr.getRight() as any;
+            const operand = typeOfExpr.getExpression();
+            if (Node.isIdentifier(operand)) {
+                narrowedVarName = operand.getText();
+                const typeString = (left as any).getLiteralValue ? (left as any).getLiteralValue() : '';
+                narrowedType = typeString;
+            }
+        }
+    }
+    
     let thenStr = '';
     if (Node.isBlock(thenStatement)) {
-        const blockResult = parseBlock(thenStatement as Block);
-        // 移除块末尾的换行和闭合括号，稍后添加
-        thenStr = blockResult.code;
+        let blockCode = parseBlock(thenStatement as Block).code;
+        // 如果有类型缩窄，在块中添加变量重命名
+        if (narrowedVarName && narrowedType) {
+            const swiftType = getSwiftTypeName(narrowedType);
+            // 在块的开头添加类型转换
+            const renamedVar = `${narrowedVarName}As${swiftType}`;
+            const typeCast = `let ${renamedVar} = ${narrowedVarName} as! ${swiftType}\n        `;
+            blockCode = blockCode.replace('{\n', `{\n        ${typeCast}`);
+        }
+        thenStr = blockCode;
     } else {
         thenStr = `{\n        ${parseStatement(thenStatement).code}\n    }`;
     }
@@ -1013,18 +1061,24 @@ function parseForStatement(statement: ForStatement): CodeResult {
     }
 
     let conditionCode = condition ? parseExpression(condition).code : '';
-    let incrementCode = incrementor ? parseExpression(incrementor).code : '';
-
-    // 处理自增运算符 ++
-    if (incrementCode.includes('++')) {
-        const variableName = incrementCode.replace('++', '').trim();
-        incrementCode = `${variableName} = ${variableName} + Number(1)`;
-    }
-
-    // 处理自减运算符 --
-    if (incrementCode.includes('--')) {
-        const variableName = incrementCode.replace('--', '').trim();
-        incrementCode = `${variableName} = ${variableName} - Number(1)`;
+    
+    // 直接处理 incrementor，不通过 parseExpression
+    let incrementCode = '';
+    if (incrementor) {
+        if (incrementor.getKind() === ts.SyntaxKind.PostfixUnaryExpression) {
+            const postfixExpr = incrementor as any;
+            const operand = postfixExpr.getOperand();
+            const operandCode = parseExpression(operand).code;
+            const operatorToken = postfixExpr.getOperatorToken();
+            const operatorKind = operatorToken ? (operatorToken as any).kind : -1;
+            if (operatorKind === ts.SyntaxKind.PlusPlusToken) {
+                incrementCode = `${operandCode} += Number(1)`;
+            } else if (operatorKind === ts.SyntaxKind.MinusMinusToken) {
+                incrementCode = `${operandCode} -= Number(1)`;
+            }
+        } else {
+            incrementCode = parseExpression(incrementor).code;
+        }
     }
     
     let bodyCode = '';
@@ -1263,10 +1317,39 @@ function parseExpression(expression?: Expression): CodeResult {
     } else if (expression.getKind() === ts.SyntaxKind.UndefinedKeyword) {
         return {code: 'Undefined()'};
     } else if (Node.isStringLiteral(expression)) {
-        return {code: `"${expression.getLiteralValue()}"`};
+        // 获取字符串文本并正确转义
+        const text = expression.getLiteralValue();
+        // 转义特殊字符
+        const escaped = text
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/\t/g, '\\t');
+        return {code: `"${escaped}"`};
     } else if (Node.isNoSubstitutionTemplateLiteral(expression)) {
         // 处理不带变量的模板字符串（反引号字符串）
-        return {code: `"${expression.getLiteralValue()}"`};
+        const text = expression.getLiteralValue();
+        const escaped = text
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/\t/g, '\\t');
+        return {code: `"${escaped}"`};
+    } else if (expression.getKind() === ts.SyntaxKind.PostfixUnaryExpression) {
+        // 处理 ++ 和 -- 运算符（Swift 不支持，转换为 += 1 或 -= 1）
+        const operand = (expression as any).getOperand();
+        const operandCode = parseExpression(operand).code;
+        const operatorToken = (expression as any).getOperatorToken();
+        // 使用 ts.Node 的属性访问
+        const operatorKind = operatorToken ? (operatorToken as any).kind : -1;
+        if (operatorKind === ts.SyntaxKind.PlusPlusToken) {
+            return {code: `${operandCode} += 1`};
+        } else if (operatorKind === ts.SyntaxKind.MinusMinusToken) {
+            return {code: `${operandCode} -= 1`};
+        }
+        return {code: operandCode};
     } else if (Node.isNumericLiteral(expression)) {
         return {code: `Number(${expression.getLiteralValue()})`};
     } else if (expression.getKind() === ts.SyntaxKind.TrueKeyword || expression.getKind() === ts.SyntaxKind.FalseKeyword) {
@@ -1284,6 +1367,9 @@ function parseExpression(expression?: Expression): CodeResult {
             swiftOperator = '!=';
         } else if (operator === '??') {
             swiftOperator = '??';
+        } else if (operator === 'instanceof') {
+            // instanceof 检查
+            return {code: `${left} is ${right}`};
         }
 
         return {code: `${left} ${swiftOperator} ${right}`};
@@ -1303,6 +1389,17 @@ function parseExpression(expression?: Expression): CodeResult {
         // 移除泛型参数，Swift 会自动推断
         const cleanedExpression = expressionPart.replace(/<[^>]+>/g, '');
         return {code: `${cleanedExpression}(${args})`};
+    } else if (Node.isConditionalExpression(expression)) {
+        // 处理三元运算符：condition ? whenTrue : whenFalse
+        const condition = parseExpression(expression.getCondition()).code;
+        const whenTrue = parseExpression(expression.getWhenTrue()).code;
+        const whenFalse = parseExpression(expression.getWhenFalse()).code;
+        return {code: `${condition} ? ${whenTrue} : ${whenFalse}`};
+    } else if (Node.isTypeOfExpression(expression)) {
+        // 处理 typeof 操作符
+        const operand = parseExpression(expression.getExpression()).code;
+        // 使用 Swift 的 Mirror 来获取运行时类型
+        return {code: `getTypeName(of: ${operand})`};
     } else if (Node.isCallExpression(expression)) {
         const callee = expression.getExpression();
         const argsList = expression.getArguments();
@@ -1482,15 +1579,18 @@ function parseExpression(expression?: Expression): CodeResult {
         const head = expression.getHead().getLiteralText();
         const spans = expression.getTemplateSpans();
 
-        let parts = [`"${head}"`];
-        spans.forEach(span => {
+        // 使用 Swift 的字符串插值
+        let swiftString = '"';
+        swiftString += head.replace(/"/g, '\\"');
+        spans.forEach((span, index) => {
             const expressionCode = parseExpression(span.getExpression()).code;
             const literal = span.getLiteral().getLiteralText();
-            parts.push(expressionCode);
-            parts.push(`"${literal}"`);
+            swiftString += `\\(${expressionCode})`;
+            swiftString += literal.replace(/"/g, '\\"');
         });
+        swiftString += '"';
 
-        return {code: parts.join(' + ')};
+        return {code: swiftString};
     } else if (Node.isTypeOfExpression(expression)) {
         const expr = parseExpression(expression.getExpression()).code;
         return {code: `String(describing: type(of: ${expr}))`};
@@ -1633,6 +1733,19 @@ function parseTypeNode(typeNode: any): string {
     if (typeName === 'null') return 'Any?';
     if (typeName === 'undefined') return 'Any?';
     if (typeName === 'Symbol') return 'Symbol';
+    // 处理元组类型 - 检查是否是 [type1, type2, ...] 格式
+    if (typeName.startsWith('[') && typeName.endsWith(']') && typeName.includes(',')) {
+        // 移除方括号并分割类型
+        const innerTypes = typeName.slice(1, -1).split(',').map(t => t.trim());
+        const swiftTypes = innerTypes.map(t => {
+            if (t === 'string') return 'String';
+            if (t === 'number') return 'Number';
+            if (t === 'boolean') return 'Bool';
+            if (t === 'any') return 'Any';
+            return t;
+        });
+        return `(${swiftTypes.join(', ')})`;
+    }
     // 处理数组类型 - 检查是否以 [] 结尾
     if (typeName.endsWith('[]')) {
         const elementTypeName = typeName.slice(0, -2);
@@ -1707,4 +1820,56 @@ function parseType(type: Type): string {
         // 其他对象类型返回 Any
         return 'Any';
     }
+}
+
+// 辅助函数：获取 Swift 中的类型名称（用于运行时类型检查）
+function getSwiftTypeName(typeName: string): string {
+    if (typeName === 'string' || typeName === 'String') {
+        return 'String';
+    } else if (typeName === 'number' || typeName === 'Number') {
+        return 'Number';
+    } else if (typeName === 'boolean' || typeName === 'Bool') {
+        return 'Bool';
+    } else if (typeName === 'any' || typeName === 'Any') {
+        return 'Any';
+    } else {
+        return typeName;
+    }
+}
+
+// 生成 getTypeName 辅助函数的定义
+function generateGetTypeNameHelper(): string {
+    return `
+// Helper function to get type name (for typeof operator)
+func getTypeName(of value: Any) -> String {
+    let mirror = Mirror(reflecting: value)
+    let valueType = type(of: value)
+    
+    // Check basic types
+    if value is String {
+        return "string"
+    } else if value is Number {
+        return "number"
+    } else if value is Bool {
+        return "boolean"
+    } else if value is Int || value is Double || value is Float {
+        return "number"
+    } else if value is Any.Type {
+        return "function"
+    } else if value is [Any] {
+        return "object"
+    } else if value is Object {
+        return "object"
+    } else if value is Null {
+        return "object"
+    } else {
+        // Use Mirror's display type name
+        let typeName = String(describing: valueType)
+        if typeName.hasPrefix("Build.") {
+            return String(typeName.dropFirst(6)).lowercased()
+        }
+        return typeName.lowercased()
+    }
+}
+`;
 }
