@@ -587,6 +587,17 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
     const declarationKind = statement.getDeclarationList().getDeclarationKind();
 
     const variableDeclarations = declarations.map((declaration: VariableDeclaration) => {
+        const nameNode = declaration.getNameNode();
+        
+        // 检查是否是解构模式
+        if (nameNode.getKind() === ts.SyntaxKind.ObjectBindingPattern) {
+            // 对象解构：const { name, age } = obj
+            return parseObjectDestructuring(declaration, declarationKind);
+        } else if (nameNode.getKind() === ts.SyntaxKind.ArrayBindingPattern) {
+            // 数组解构：const [a, b] = arr
+            return parseArrayDestructuring(declaration, declarationKind);
+        }
+        
         let name = declaration.getName();
         // 检查是否是 Swift 关键字，如果是则添加反引号
         const swiftKeywords = ['nil', 'var', 'let', 'class', 'func', 'if', 'else', 'switch', 'case', 'default', 'do', 'while', 'for', 'in', 'return', 'break', 'continue', 'throw', 'try', 'catch', 'guard', 'where', 'is', 'as', 'super', 'self', 'init', 'deinit', 'typealias', 'struct', 'enum', 'extension', 'protocol', 'associatedtype', 'operator', 'precedencegroup', 'rethrows', 'defer', 'repeat', 'some', 'any', 'Type', 'Self'];
@@ -670,6 +681,99 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
     });
 
     return {code: variableDeclarations.join('\n')};
+}
+
+// 解析对象解构赋值
+function parseObjectDestructuring(declaration: VariableDeclaration, declarationKind: VariableDeclarationKind): string {
+    const nameNode = declaration.getNameNode() as any;
+    const initializer = declaration.getInitializer();
+    
+    if (!initializer) {
+        // 没有初始化表达式，无法解构
+        return '';
+    }
+    
+    const initializerCode = parseExpression(initializer).code;
+    const swiftDeclarationKind = declarationKind === VariableDeclarationKind.Const ? 'let' : 'var';
+    
+    // 获取解构的元素
+    const elements = nameNode.getElements ? nameNode.getElements() : [];
+    const declarations: string[] = [];
+    
+    for (const element of elements) {
+        // 对于 { name: userName } 这种语法：
+        // TypeScript AST 中，BindingElement 的结构是：
+        // { propertyName: Identifier, name: Identifier }
+        // 其中 propertyName 是属性名（name），name 是变量名（userName）
+        
+        // 使用 ts-morph 的 API 获取 name 节点
+        const nameNode = element.getNameNode ? element.getNameNode() : null;
+        const variableName = nameNode ? nameNode.getText() : '';
+        
+        // 获取 propertyName 节点 - 使用 ts 包直接访问
+        const elementAny = element as any;
+        let propertyName = variableName; // 默认使用变量名
+        
+        // 尝试访问底层的 ts.BindingPattern 的 propertyName
+        if (elementAny.compilerNode && elementAny.compilerNode.propertyName) {
+            const propNameNode = elementAny.compilerNode.propertyName;
+            if (propNameNode && propNameNode.text) {
+                propertyName = propNameNode.text;
+            }
+        }
+        
+        const initializer = element.getInitializer ? element.getInitializer() : null;
+        
+        // 生成 Swift 代码：let userName = obj.name
+        let declCode = `${swiftDeclarationKind} ${variableName} = ${initializerCode}.${propertyName}`;
+        
+        // 如果有默认值
+        if (initializer) {
+            const defaultVal = parseExpression(initializer).code;
+            declCode += ` ?? ${defaultVal}`;
+        }
+        
+        declarations.push(declCode);
+    }
+    
+    return declarations.join('\n');
+}
+
+// 解析数组解构赋值
+function parseArrayDestructuring(declaration: VariableDeclaration, declarationKind: VariableDeclarationKind): string {
+    const nameNode = declaration.getNameNode() as any;
+    const initializer = declaration.getInitializer();
+    
+    if (!initializer) {
+        // 没有初始化表达式，无法解构
+        return '';
+    }
+    
+    const initializerCode = parseExpression(initializer).code;
+    const swiftDeclarationKind = declarationKind === VariableDeclarationKind.Const ? 'let' : 'var';
+    
+    // 获取解构的元素
+    const elements = nameNode.getElements ? nameNode.getElements() : [];
+    const declarations: string[] = [];
+    
+    for (let i = 0; i < elements.length; i++) {
+        const element = elements[i];
+        const variableName = element.getName ? element.getName() : `_${i}`;
+        const initializer = element.getInitializer ? element.getInitializer() : null;
+        
+        // 生成 Swift 代码：let a = arr[0]
+        let declCode = `${swiftDeclarationKind} ${variableName} = ${initializerCode}[${i}]`;
+        
+        // 如果有默认值
+        if (initializer) {
+            const defaultVal = parseExpression(initializer).code;
+            declCode += ` ?? ${defaultVal}`;
+        }
+        
+        declarations.push(declCode);
+    }
+    
+    return declarations.join('\n');
 }
 
 function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
@@ -1082,12 +1186,12 @@ function parseIfStatement(statement: IfStatement): CodeResult {
     let thenResult: CodeResult;
     if (Node.isBlock(thenStatement)) {
         thenResult = parseBlock(thenStatement as Block);
-        // 如果有类型缩窄，在块中添加变量重命名
+        // 如果有类型缩窄，在块中添加变量重命名（使用 shadowing 技术）
         if (narrowedVarName && narrowedType) {
             const swiftType = getSwiftTypeName(narrowedType);
-            const renamedVar = `${narrowedVarName}As${swiftType}`;
+            // 创建一个同名的新变量，覆盖原来的 Any 类型变量
             const typeCastCode = {
-                code: `let ${renamedVar} = ${narrowedVarName} as! ${swiftType}`,
+                code: `let ${narrowedVarName} = ${narrowedVarName} as! ${swiftType}`,
                 indentLevel: 1  // 在块内，所以加 1 级缩进
             };
             // 将类型转换插入到块的开头
@@ -1494,6 +1598,25 @@ function parseExpression(expression?: Expression): CodeResult {
         const operand = parseExpression(expression.getExpression()).code;
         // 使用 Swift 的 Mirror 来获取运行时类型
         return {code: `getTypeName(of: ${operand})`};
+    } else if (expression.getKind() === ts.SyntaxKind.RegularExpressionLiteral) {
+        // 处理正则表达式字面量，如 /[.]*/
+        const regexText = expression.getText();
+        // 移除两边的斜杠，提取正则表达式内容
+        // 格式：/pattern/flags
+        const match = regexText.match(/^\/(.*)\/([gimsuy]*)$/);
+        if (match) {
+            const pattern = match[1];
+            const flags = match[2] || '';
+            // 转换为 Swift 的 RegExp 对象
+            return {code: `RegExp("${pattern}", flags: "${flags}")`};
+        }
+        // 如果格式不对，返回原始文本
+        return {code: regexText};
+    } else if (Node.isBlock(expression)) {
+        // 处理块状表达式（单独的代码块）
+        const blockResult = parseBlock(expression as Block);
+        // 块状表达式在 Swift 中可以直接使用 do 块
+        return {code: `do ${blockResult.code}`};
     } else if (Node.isCallExpression(expression)) {
         const callee = expression.getExpression();
         const argsList = expression.getArguments();
@@ -1820,6 +1943,48 @@ function parseNode(node: Node): CodeResult {
 }
 
 function parseTypeNode(typeNode: any): string {
+    // 处理联合类型（如 number | undefined）
+    if (typeNode.kind === ts.SyntaxKind.UnionType || typeNode.getKindName() === 'UnionType') {
+        // 尝试使用 getTypes 方法获取联合类型的各个成员
+        if (typeof typeNode.getTypes === 'function') {
+            const types = typeNode.getTypes();
+            if (types && types.length > 0) {
+                // 检查是否是 T | undefined 或 T | null 的形式
+                const nonUndefinedTypes = types.filter((t: any) => {
+                    const typeName = t.getText();
+                    return typeName !== 'undefined' && typeName !== 'null';
+                });
+                
+                if (nonUndefinedTypes.length === 1) {
+                    // 只有一个实际类型，其他都是 undefined/null，返回可选类型
+                    const actualType = parseTypeNode(nonUndefinedTypes[0]);
+                    // 如果已经是 Any，不需要再添加可选标记
+                    if (actualType === 'Any') {
+                        return 'Any';
+                    }
+                    return actualType + '?';
+                } else if (nonUndefinedTypes.length === 0) {
+                    // 所有类型都是 undefined/null，返回 Any?
+                    return 'Any?';
+                } else {
+                    // 多个实际类型的联合，统一转为 Any
+                    return 'Any';
+                }
+            }
+        }
+        // 无法解析 getTypes，统一转为 Any
+        return 'Any';
+    }
+    
+    // 尝试使用 getTypes 方法（联合类型）
+    if (typeof typeNode.getTypes === 'function') {
+        const types = typeNode.getTypes();
+        if (types && types.length > 0) {
+            // 这是联合类型，返回 Any
+            return 'Any';
+        }
+    }
+    
     const typeName = typeNode.getText();
     // 处理基本类型
     if (typeName === 'string') return 'String';
@@ -1828,8 +1993,8 @@ function parseTypeNode(typeNode: any): string {
     if (typeName === 'any') return 'Any';
     if (typeName === 'Object') return 'Object';
     if (typeName === 'void') return 'Void';
-    if (typeName === 'null') return 'Any?';
-    if (typeName === 'undefined') return 'Any?';
+    if (typeName === 'null') return 'Any';
+    if (typeName === 'undefined') return 'Any';
     if (typeName === 'Symbol') return 'Symbol';
     // 处理元组类型 - 检查是否是 [type1, type2, ...] 格式
     if (typeName.startsWith('[') && typeName.endsWith(']') && typeName.includes(',')) {
