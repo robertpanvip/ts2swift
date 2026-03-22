@@ -38,10 +38,35 @@ import {fileURLToPath} from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// CodeResult 类型定义，包含代码和缩进层级
 type CodeResult = {
     code: string,
+    indentLevel?: number,  // 缩进层级（0=无缩进，1=4 个空格，2=8 个空格，以此类推）
     type?: string
 };
+
+// 辅助函数：根据缩进层级生成缩进字符串
+function getIndent(level: number = 0): string {
+    return '    '.repeat(level);
+}
+
+// 辅助函数：为代码添加指定层级的缩进
+function indentCode(code: string, level: number = 0): string {
+    if (level === 0) return code;
+    const indent = getIndent(level);
+    return code.split('\n').map(line => indent + line).join('\n');
+}
+
+// 辅助函数：合并 CodeResult，考虑缩进
+function mergeCodeResults(results: CodeResult[], options: { baseIndent?: number, joinWith?: string } = {}): string {
+    const baseIndent = options.baseIndent ?? 0;
+    const joinWith = options.joinWith ?? '\n';
+    
+    return results.map(result => {
+        const totalIndent = baseIndent + (result.indentLevel ?? 0);
+        return indentCode(result.code, totalIndent);
+    }).join(joinWith);
+}
 
 const project = new Project();
 
@@ -95,10 +120,10 @@ function processObjectLiteral(expression: any): string {
             }
             
             // 使用可选类型（Type?），这样可以在 super.init() 后初始化
-            return `public var ${propName}: ${propType}?`;
+            return { code: `public var ${propName}: ${propType}?`, indentLevel: 1 };
         }
-        return '';
-    }).filter(Boolean).join('\n        ');
+        return null;
+    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
     
     // 生成 init 参数
     const initParams = expression.getProperties().map((property: any) => {
@@ -127,21 +152,37 @@ function processObjectLiteral(expression: any): string {
     const initAssignments = expression.getProperties().map((property: any) => {
         if (Node.isPropertyAssignment(property)) {
             const propName = property.getName();
-            return `        self.${propName} = ${propName}`;
+            return { code: `self.${propName} = ${propName}`, indentLevel: 1 };
         }
-        return '';
-    }).filter(Boolean).join('\n');
+        return null;
+    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
     
     const propertiesAssignments = expression.getProperties().map((property: any) => {
         if (Node.isPropertyAssignment(property)) {
             const propName = property.getName();
-            return `        self.properties["${propName}"] = ${propName}`;
+            return { code: `self.properties["${propName}"] = ${propName}`, indentLevel: 1 };
         }
-        return '';
-    }).filter(Boolean).join('\n');
+        return null;
+    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
     
     const className = `AnonymousObject_${objectLiteralCounter++}`;
-    const classDef = `class ${className}: Object {\n        ${properties}\n        \n        init(${initParams}) {\n            super.init()\n${initAssignments}\n${propertiesAssignments}\n        }\n    }`;
+    
+    // 合并 init 方法体
+    const initBodyStatements = [{ code: 'super.init()', indentLevel: 1 }, ...initAssignments, ...propertiesAssignments];
+    const initBody = mergeCodeResults(initBodyStatements, { baseIndent: 0, joinWith: '\n' });
+    
+    // 构建 class 定义
+    const classParts = [
+        { code: 'class ' + className + ': Object {', indentLevel: 0 },
+        ...properties,
+        { code: '', indentLevel: 0 }, // 空行
+        { code: `init(${initParams}) {`, indentLevel: 0 },
+        ...initBodyStatements,
+        { code: '}', indentLevel: 0 },
+        { code: '}', indentLevel: 0 }
+    ];
+    
+    const classDef = mergeCodeResults(classParts, { baseIndent: 0, joinWith: '\n' });
     anonymousClasses.push(classDef);
     
     // 生成初始化参数
@@ -435,7 +476,11 @@ function generateSwiftCode(sourceFile: SourceFile, fileName: string): string {
         
         // 添加成员
         if (exportedMembers.length > 0) {
-            moduleCode += `    ${exportedMembers.join('\n    ')}\n`;
+            // 对每个成员的所有行添加 4 个空格的缩进（enum 层级）
+            const indentedMembers = exportedMembers.map(member => {
+                return member.split('\n').map(line => '    ' + line).join('\n');
+            }).join('\n');
+            moduleCode += `${indentedMembers}\n`;
         }
         
         // 添加 typealias 声明
@@ -467,11 +512,19 @@ function generateSwiftCode(sourceFile: SourceFile, fileName: string): string {
         });
         // 然后执行导入语句
         if (importStatements.length > 0) {
-            moduleCode += `        ${importStatements.join('\n        ')}\n`;
+            // 对每个导入语句的所有行添加缩进
+            const indentedImports = importStatements.map(stmt => {
+                return stmt.split('\n').map(line => '        ' + line).join('\n');
+            }).join('\n');
+            moduleCode += `${indentedImports}\n`;
         }
         // 然后执行顶层语句
         if (topLevelStatements.length > 0) {
-            moduleCode += `        ${topLevelStatements.join('\n        ')}\n`;
+            // 对每个顶层语句的所有行添加缩进
+            const indentedStatements = topLevelStatements.map(stmt => {
+                return stmt.split('\n').map(line => '        ' + line).join('\n');
+            }).join('\n');
+            moduleCode += `${indentedStatements}\n`;
         }
         moduleCode += `    }\n`;
         
@@ -652,7 +705,7 @@ function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
         const statements = (body as Block).getStatements()
             .map(statement => parseStatement(statement).code)
             .join('\n');
-        // 为每一行添加 4 个空格的缩进
+        // 为每一行添加 4 个空格的缩进（函数体内的缩进）
         const indentedStatements = statements.split('\n').map(line => '    ' + line).join('\n');
         bodyStr = `{\n${indentedStatements}\n}`;
     }
@@ -709,9 +762,9 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
         inheritsStr = `: ${allInherits.join(', ')}`;
     }
 
-    let properties: string[] = [];
-    let methods: string[] = [];
-    let initializer: string[] = [];
+    let properties: CodeResult[] = [];
+    let methods: CodeResult[] = [];
+    let initializer: CodeResult[] = [];
 
     members.forEach((member: ClassMemberTypes) => {
         if (Node.isPropertyDeclaration(member)) {
@@ -731,7 +784,10 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             const varKeyword = isReadonly ? 'let' : 'var';
             const staticKeyword = isStatic ? 'static ' : '';
             const accessModifier = isPrivate ? 'private ' : '';
-            properties.push(`${accessModifier}${staticKeyword}${varKeyword} ${propName}: ${propType}${initStr}`);
+            properties.push({
+                code: `${accessModifier}${staticKeyword}${varKeyword} ${propName}: ${propType}${initStr}`,
+                indentLevel: 1  // class 成员需要 1 级缩进
+            });
         } else if (Node.isMethodDeclaration(member)) {
             const methodName = member.getName() || '';
             const parameters = member.getParameters();
@@ -750,20 +806,23 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             const returnTypeStr = parseType(returnType);
             
             // abstract 方法没有方法体
-            let methodStr = '';
+            let methodCode = '';
             if (isAbstract) {
                 // Swift 没有直接的 abstract，使用 protocol 或要求子类实现
                 // 这里我们生成一个空实现，或者可以抛出 fatalError
-                methodStr = `func ${methodName}(${params}) -> ${returnTypeStr} { fatalError("Abstract method ${methodName} not implemented") }`;
+                methodCode = `func ${methodName}(${params}) -> ${returnTypeStr} { fatalError("Abstract method ${methodName} not implemented") }`;
             } else {
                 const bodyStr = body ? parseBlock(body as Block).code : '{}';
-                methodStr = `func ${methodName}(${params}) -> ${returnTypeStr} ${bodyStr}`;
+                methodCode = `func ${methodName}(${params}) -> ${returnTypeStr} ${bodyStr}`;
             }
             
             // 添加修饰符
             const staticKeyword = isStatic ? 'static ' : '';
             const overrideKeyword = isOverride ? 'override ' : '';
-            methods.push(`${overrideKeyword}${staticKeyword}${methodStr}`);
+            methods.push({
+                code: `${overrideKeyword}${staticKeyword}${methodCode}`,
+                indentLevel: 1  // class 成员需要 1 级缩进
+            });
         } else if (Node.isConstructorDeclaration(member)) {
             const parameters = member.getParameters();
             const body = member.getBody();
@@ -776,17 +835,23 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
 
             const bodyStr = body ? parseBlock(body as Block).code : '{}';
 
-            initializer.push(`init(${params}) ${bodyStr}`);
+            initializer.push({
+                code: `init(${params}) ${bodyStr}`,
+                indentLevel: 1  // class 成员需要 1 级缩进
+            });
         }
     });
 
-    const classBody = [...properties, ...initializer, ...methods].join('\n\n');
+    // 合并所有成员，使用 2 个换行分隔
+    const allMembers = [...properties, ...initializer, ...methods];
+    const classBody = mergeCodeResults(allMembers, { baseIndent: 0, joinWith: '\n\n' });
     
     // 抽象类使用注释标记（Swift 没有直接的 abstract 类）
     const classKeyword = isAbstract ? '/* abstract */ class' : 'class';
 
     return {
-        code: `${isExport ? 'public ' : ''}${classKeyword} ${name}${genericStr}${inheritsStr} {\n${classBody}\n}`
+        code: `${isExport ? 'public ' : ''}${classKeyword} ${name}${genericStr}${inheritsStr} {\n${classBody}\n}`,
+        indentLevel: 0
     };
 }
 
@@ -1014,37 +1079,53 @@ function parseIfStatement(statement: IfStatement): CodeResult {
         }
     }
     
-    let thenStr = '';
+    let thenResult: CodeResult;
     if (Node.isBlock(thenStatement)) {
-        let blockCode = parseBlock(thenStatement as Block).code;
+        thenResult = parseBlock(thenStatement as Block);
         // 如果有类型缩窄，在块中添加变量重命名
         if (narrowedVarName && narrowedType) {
             const swiftType = getSwiftTypeName(narrowedType);
-            // 在块的开头添加类型转换
             const renamedVar = `${narrowedVarName}As${swiftType}`;
-            const typeCast = `let ${renamedVar} = ${narrowedVarName} as! ${swiftType}\n        `;
-            blockCode = blockCode.replace('{\n', `{\n        ${typeCast}`);
+            const typeCastCode = {
+                code: `let ${renamedVar} = ${narrowedVarName} as! ${swiftType}`,
+                indentLevel: 1  // 在块内，所以加 1 级缩进
+            };
+            // 将类型转换插入到块的开头
+            thenResult = {
+                code: `{\n${indentCode(typeCastCode.code, typeCastCode.indentLevel)}\n${thenResult.code.substring(2)}`,
+                indentLevel: 0
+            };
         }
-        thenStr = blockCode;
     } else {
-        thenStr = `{\n        ${parseStatement(thenStatement).code}\n    }`;
+        const stmtResult = parseStatement(thenStatement);
+        thenResult = {
+            code: `{\n${indentCode(stmtResult.code, 1)}\n}`,
+            indentLevel: 0
+        };
     }
     
-    let elseStr = '';
+    let elseResult: CodeResult | null = null;
     const elseStatement = statement.getElseStatement();
     if (elseStatement) {
         if (Node.isBlock(elseStatement)) {
-            const blockResult = parseBlock(elseStatement as Block);
-            elseStr = ` else ${blockResult.code}`;
+            elseResult = parseBlock(elseStatement as Block);
         } else if (Node.isIfStatement(elseStatement)) {
-            // 嵌套的 if-else
-            elseStr = ` else ${parseIfStatement(elseStatement as IfStatement).code}`;
+            elseResult = parseIfStatement(elseStatement as IfStatement);
         } else {
-            elseStr = ` else {\n        ${parseStatement(elseStatement).code}\n    }`;
+            const stmtResult = parseStatement(elseStatement);
+            elseResult = {
+                code: `{\n${indentCode(stmtResult.code, 1)}\n}`,
+                indentLevel: 0
+            };
         }
     }
     
-    return {code: `if ${condition} ${thenStr}${elseStr}`};
+    const elseStr = elseResult ? ` else ${elseResult.code}` : '';
+    
+    return {
+        code: `if ${condition} ${thenResult.code}${elseStr}`,
+        indentLevel: 0
+    };
 }
 
 function parseForStatement(statement: ForStatement): CodeResult {
@@ -1093,22 +1174,31 @@ function parseForStatement(statement: ForStatement): CodeResult {
     let bodyCode = '';
     if (body && Node.isBlock(body)) {
         // 将 increment 代码添加到循环体的末尾
-        const blockStatements = body.getStatements().map(statement => parseStatement(statement).code).join('\n');
-        const incrementStmt = incrementCode ? `\n${incrementCode}` : '';
-        // 为每一行添加 12 个空格的缩进（do 块 4 个 + while 循环 4 个 + 循环体 4 个）
-        const allStatements = blockStatements + incrementStmt;
-        const indentedStatements = allStatements.split('\n').map(line => '            ' + line).join('\n');
-        bodyCode = `{\n${indentedStatements}\n        }`;
+        const blockStatements = body.getStatements().map(statement => parseStatement(statement));
+        if (incrementCode) {
+            blockStatements.push({ code: incrementCode, indentLevel: 0 });
+        }
+        const bodyResult = parseBlock(body as Block);
+        // 重新构建带 increment 的块
+        const allStatements = [...body.getStatements().map(s => parseStatement(s))];
+        if (incrementCode) {
+            allStatements.push({ code: incrementCode, indentLevel: 0 });
+        }
+        const mergedBody = mergeCodeResults(allStatements, { baseIndent: 1, joinWith: '\n' });
+        bodyCode = `{\n${mergedBody}\n}`;
     } else if (body) {
-        bodyCode = `{\n            ${parseStatement(body).code} ${incrementCode}\n        }`;
+        const stmtResult = parseStatement(body);
+        bodyCode = `{\n${indentCode(stmtResult.code, 1)}${incrementCode ? '\n    ' + incrementCode : ''}\n}`;
     } else {
-        bodyCode = `{ ${incrementCode} }`;
+        bodyCode = `{${incrementCode ? ' ' + incrementCode + ' ' : ''}}`;
     }
     
     // Swift 不支持 C 风格的 for 循环，使用 while 循环替代
     // 将初始化代码和 while 循环包装到一个 do 块中，避免变量污染外部作用域
-    // do 块的闭合括号与 main 函数的缩进级别一致
-    return {code: `do {\n        ${initCode}; while ${conditionCode} ${bodyCode}\n    }`};
+    return {
+        code: `do {\n${indentCode(initCode, 1)}\n${indentCode(`while ${conditionCode} ${bodyCode}`, 1)}\n}`,
+        indentLevel: 0
+    };
 }
 
 function parseWhileStatement(statement: WhileStatement): CodeResult {
@@ -1117,14 +1207,19 @@ function parseWhileStatement(statement: WhileStatement): CodeResult {
     
     let bodyCode = '';
     if (body && Node.isBlock(body)) {
-        bodyCode = parseBlock(body as Block).code;
+        const bodyResult = parseBlock(body as Block);
+        bodyCode = bodyResult.code;
     } else if (body) {
-        bodyCode = `{ ${parseStatement(body).code} }`;
+        const stmtResult = parseStatement(body);
+        bodyCode = `{\n${indentCode(stmtResult.code, 1)}\n}`;
     } else {
         bodyCode = '{}';
     }
     
-    return {code: `while ${condition} ${bodyCode}`};
+    return {
+        code: `while ${condition} ${bodyCode}`,
+        indentLevel: 0
+    };
 }
 
 function parseDoWhileStatement(statement: DoStatement): CodeResult {
@@ -1133,15 +1228,20 @@ function parseDoWhileStatement(statement: DoStatement): CodeResult {
     
     let bodyCode = '';
     if (body && Node.isBlock(body)) {
-        bodyCode = parseBlock(body as Block).code;
+        const bodyResult = parseBlock(body as Block);
+        bodyCode = bodyResult.code;
     } else if (body) {
-        bodyCode = `{ ${parseStatement(body).code} }`;
+        const stmtResult = parseStatement(body);
+        bodyCode = `{\n${indentCode(stmtResult.code, 1)}\n}`;
     } else {
         bodyCode = '{}';
     }
     
     // Swift 使用 repeat-while 语法
-    return {code: `repeat ${bodyCode} while ${condition}`};
+    return {
+        code: `repeat ${bodyCode} while ${condition}`,
+        indentLevel: 0
+    };
 }
 
 function parseSwitchStatement(statement: SwitchStatement): CodeResult {
@@ -1153,30 +1253,21 @@ function parseSwitchStatement(statement: SwitchStatement): CodeResult {
     for (const clause of clauses) {
         if (Node.isCaseClause(clause)) {
             const caseValue = parseExpression(clause.getExpression()).code;
-            const statements = clause.getStatements();
-            let caseBody = '';
-            for (const stmt of statements) {
-                const stmtCode = parseStatement(stmt).code;
-                if (stmtCode) {
-                    caseBody += `    ${stmtCode}\n`;
-                }
-            }
-            switchCode += `case ${caseValue}:\n${caseBody}`;
+            const statements = clause.getStatements().map(s => parseStatement(s));
+            const caseBody = mergeCodeResults(statements, { baseIndent: 1, joinWith: '\n' });
+            switchCode += `case ${caseValue}:\n${caseBody}\n`;
         } else if (Node.isDefaultClause(clause)) {
-            const statements = clause.getStatements();
-            let defaultBody = '';
-            for (const stmt of statements) {
-                const stmtCode = parseStatement(stmt).code;
-                if (stmtCode) {
-                    defaultBody += `    ${stmtCode}\n`;
-                }
-            }
-            switchCode += `default:\n${defaultBody}`;
+            const statements = clause.getStatements().map(s => parseStatement(s));
+            const defaultBody = mergeCodeResults(statements, { baseIndent: 1, joinWith: '\n' });
+            switchCode += `default:\n${defaultBody}\n`;
         }
     }
     
     switchCode += '}';
-    return {code: switchCode};
+    return {
+        code: switchCode,
+        indentLevel: 0
+    };
 }
 
 function parseTryStatement(statement: TryStatement): CodeResult {
@@ -1184,56 +1275,40 @@ function parseTryStatement(statement: TryStatement): CodeResult {
     const catchClause = statement.getCatchClause();
     const finallyBlock = statement.getFinallyBlock();
     
-    let tryCode = 'do {\n';
-    const tryStatements = tryBlock.getStatements();
-    for (const stmt of tryStatements) {
-        const stmtCode = parseStatement(stmt).code;
-        if (stmtCode) {
-            tryCode += `    ${stmtCode}\n`;
-        }
-    }
-    tryCode += '}';
+    const tryStatements = tryBlock.getStatements().map(s => parseStatement(s));
+    const tryBody = mergeCodeResults(tryStatements, { baseIndent: 1, joinWith: '\n' });
+    let tryCode = `do {\n${tryBody}\n}`;
     
     // 处理 catch
     if (catchClause) {
         const catchVar = catchClause.getVariableDeclaration();
         const catchBlock = catchClause.getBlock();
         
+        let catchHeader = ' catch {';
         if (catchVar) {
             const varName = catchVar.getName();
-            tryCode += ` catch {\n`;
-            tryCode += `    let ${varName} = error\n`;
-        } else {
-            tryCode += ` catch {\n`;
+            catchHeader = ` catch {\n${indentCode(`let ${varName} = error`, 1)}\n`;
         }
         
-        const catchStatements = catchBlock.getStatements();
-        for (const stmt of catchStatements) {
-            const stmtCode = parseStatement(stmt).code;
-            if (stmtCode) {
-                tryCode += `    ${stmtCode}\n`;
-            }
-        }
-        tryCode += '}';
+        const catchStatements = catchBlock.getStatements().map(s => parseStatement(s));
+        const catchBody = mergeCodeResults(catchStatements, { baseIndent: 1, joinWith: '\n' });
+        tryCode += `${catchHeader}${catchBody}\n}`;
     }
     
     // 处理 finally - Swift 没有 finally，使用 defer 模拟
     if (finallyBlock) {
         // 将 finally 块包装在 defer 中，放在 try-catch 之前
-        let finallyCode = 'defer {\n';
-        const finallyStatements = finallyBlock.getStatements();
-        for (const stmt of finallyStatements) {
-            const stmtCode = parseStatement(stmt).code;
-            if (stmtCode) {
-                finallyCode += `    ${stmtCode}\n`;
-            }
-        }
-        finallyCode += '}\n';
+        const finallyStatements = finallyBlock.getStatements().map(s => parseStatement(s));
+        const finallyBody = mergeCodeResults(finallyStatements, { baseIndent: 1, joinWith: '\n' });
+        const deferCode = `defer {\n${finallyBody}\n}\n`;
         // 将 defer 放在 try-catch 之前
-        tryCode = finallyCode + tryCode;
+        tryCode = deferCode + tryCode;
     }
     
-    return {code: tryCode};
+    return {
+        code: tryCode,
+        indentLevel: 0
+    };
 }
 
 function parseForOfStatement(statement: ForOfStatement): CodeResult {
@@ -1260,15 +1335,20 @@ function parseForOfStatement(statement: ForOfStatement): CodeResult {
     
     let bodyCode = '';
     if (body && Node.isBlock(body)) {
-        bodyCode = parseBlock(body as Block).code;
+        const bodyResult = parseBlock(body as Block);
+        bodyCode = bodyResult.code;
     } else if (body) {
-        bodyCode = `{ ${parseStatement(body).code} }`;
+        const stmtResult = parseStatement(body);
+        bodyCode = `{\n${indentCode(stmtResult.code, 1)}\n}`;
     } else {
         bodyCode = '{}';
     }
     
     // Swift 的 for-in 循环语法：for item in collection { }
-    return {code: `for ${varName} in ${exprCode} ${bodyCode}`};
+    return {
+        code: `for ${varName} in ${exprCode} ${bodyCode}`,
+        indentLevel: 0
+    };
 }
 
 function parseForInStatement(statement: ForInStatement): CodeResult {
@@ -1295,16 +1375,21 @@ function parseForInStatement(statement: ForInStatement): CodeResult {
     
     let bodyCode = '';
     if (body && Node.isBlock(body)) {
-        bodyCode = parseBlock(body as Block).code;
+        const bodyResult = parseBlock(body as Block);
+        bodyCode = bodyResult.code;
     } else if (body) {
-        bodyCode = `{ ${parseStatement(body).code} }`;
+        const stmtResult = parseStatement(body);
+        bodyCode = `{\n${indentCode(stmtResult.code, 1)}\n}`;
     } else {
         bodyCode = '{}';
     }
     
     // for...in 循环遍历对象的键，需要使用 Object.keys() 方法
     // Swift 的 for-in 循环语法：for key in Object.keys(object) { }
-    return {code: `for ${varName} in Object.keys(${exprCode}) ${bodyCode}`};
+    return {
+        code: `for ${varName} in Object.keys(${exprCode}) ${bodyCode}`,
+        indentLevel: 0
+    };
 }
 
 
@@ -1684,11 +1769,15 @@ function parseEnumDeclaration(statement: any): CodeResult {
 
 function parseBlock(block: Block): CodeResult {
     const statements = block.getStatements()
-        .map(statement => parseStatement(statement).code)
-        .join('\n');
-    // 为每一行添加 8 个空格的缩进（因为块已经在 main 函数内部）
-    const indentedStatements = statements.split('\n').map(line => '        ' + line).join('\n');
-    return {code: `{\n${indentedStatements}\n    }`};
+        .map(statement => parseStatement(statement));
+    
+    // 合并所有语句，每个语句在块内增加 1 级缩进
+    const bodyCode = mergeCodeResults(statements, { baseIndent: 1, joinWith: '\n' });
+    
+    return {
+        code: `{\n${bodyCode}\n}`,
+        indentLevel: 0  // 块本身的缩进由调用者决定
+    };
 }
 
 function parseNode(node: Node): CodeResult {
