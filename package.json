@@ -31,8 +31,12 @@
     "run-symbol": "npm run ts-swift ./test/ts/symbol.ts",
     "run-modifiers": "npm run ts-swift ./test/ts/modifiers.ts",
     "run-union-type": "npm run ts-swift ./test/ts/union-type-test.ts",
+    "run-union-type-comprehensive": "npm run ts-swift ./test/ts/union-type-comprehensive-test.ts",
     "run-optional-chain": "npm run ts-swift ./test/ts/optional-chain-test.ts",
-    "run-type-narrowing": "npm run ts-swift ./test/ts/type-narrowing-test.ts"
+    "run-type-narrowing": "npm run ts-swift ./test/ts/type-narrowing-test.ts",
+    "run-type-narrowing-comprehensive": "npm run ts-swift ./test/ts/type-narrowing-comprehensive-test.ts",
+    "run-union-type-simple": "npm run ts-swift ./test/ts/union-type-simple-test.ts",
+    "run-type-guards": "npm run ts-swift ./test/ts/type-guards-test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

@@ -25,26 +25,26 @@ if (score >= 90) {
 }
 
 // for 循环
-let sum = 0;
-for (let i = 1; i <= 5; i = i + 1) {
+let sum: number = 0;
+for (let i: number = 1; i <= 5; i = i + 1) {
     sum = sum + i;
 }
 console.log("Sum 1 to 5:", sum);
 
 // for 循环递减
-for (let i = 5; i > 0; i = i - 1) {
+for (let i: number = 5; i > 0; i = i - 1) {
     console.log("Countdown:", i);
 }
 
 // while 循环
-let count = 0;
+let count: number = 0;
 while (count < 3) {
     console.log("While count:", count);
     count = count + 1;
 }
 
 // do-while 循环（用 while 模拟）
-let doCount = 0;
+let doCount: number = 0;
 console.log("Do-while:", doCount);
 doCount = doCount + 1;
 while (doCount < 3) {

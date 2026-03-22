@@ -9,15 +9,15 @@ interface IPerson {
 
 // 实现接口的类
 class Person implements IPerson {
-    name: string;
-    age: number;
+    public name: string;
+    public age: number;
     
     constructor(name: string, age: number) {
         this.name = name;
         this.age = age;
     }
     
-    greet(): string {
+    public greet(): string {
         return "Hello, my name is " + this.name + " and I am " + this.age + " years old.";
     }
 }

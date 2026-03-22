@@ -1250,7 +1250,22 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             // readonly 属性使用 let 而不是 var
             const varKeyword = isReadonly ? 'let' : 'var';
             const staticKeyword = isStatic ? 'static ' : '';
-            const accessModifier = isPrivate ? 'private ' : '';
+            
+            // TypeScript 默认是 public，但 Swift 需要显式声明
+            // 如果有 private/protected，使用对应的访问修饰符
+            // 否则如果是 implements 接口的类，默认添加 public
+            const isProtected = member.hasModifier(ts.SyntaxKind.ProtectedKeyword);
+            const isPublic = member.hasModifier(ts.SyntaxKind.PublicKeyword);
+            let accessModifier = '';
+            if (isPrivate) {
+                accessModifier = 'private ';
+            } else if (isProtected) {
+                accessModifier = 'internal '; // Swift 没有直接的 protected，使用 internal
+            } else if (isPublic || implementsTypes.length > 0) {
+                // 显式 public 或实现接口的类，使用 public
+                accessModifier = 'public ';
+            }
+            
             properties.push({
                 code: `${accessModifier}${staticKeyword}${varKeyword} ${propName}: ${propType}${initStr}`,
                 indentLevel: 1  // class 成员需要 1 级缩进
@@ -1293,6 +1308,20 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             
             // 添加修饰符
             const staticKeyword = isStatic ? 'static ' : '';
+            
+            // 处理访问修饰符（与属性相同逻辑）
+            const isMethodPrivate = member.hasModifier(ts.SyntaxKind.PrivateKeyword);
+            const isMethodProtected = member.hasModifier(ts.SyntaxKind.ProtectedKeyword);
+            const isMethodPublic = member.hasModifier(ts.SyntaxKind.PublicKeyword);
+            let methodAccessModifier = '';
+            if (isMethodPrivate) {
+                methodAccessModifier = 'private ';
+            } else if (isMethodProtected) {
+                methodAccessModifier = 'internal ';
+            } else if (isMethodPublic || implementsTypes.length > 0) {
+                methodAccessModifier = 'public ';
+            }
+            
             // 检测是否需要 override 关键字
             // 只有当方法在父类中存在时才需要 override
             let needsOverride = isOverride;
@@ -1316,7 +1345,7 @@ function parseClassDeclaration(statement: ClassDeclaration): CodeResult {
             }
             const overrideKeyword = needsOverride ? 'override ' : '';
             methods.push({
-                code: `${overrideKeyword}${staticKeyword}${methodCode}`,
+                code: `${methodAccessModifier}${overrideKeyword}${staticKeyword}${methodCode}`,
                 indentLevel: 1  // class 成员需要 1 级缩进
             });
         } else if (Node.isConstructorDeclaration(member)) {
@@ -1675,6 +1704,8 @@ function parseForStatement(statement: ForStatement): CodeResult {
     }
 
     let conditionCode = condition ? parseExpression(condition).code : '';
+    // 移除条件中的 as! 类型断言，避免 Swift 解析错误
+    conditionCode = conditionCode.replace(/\s+as!\s+\w+/g, '');
     
     // 直接处理 incrementor，不通过 parseExpression
     let incrementCode = '';
@@ -1744,8 +1775,11 @@ function parseWhileStatement(statement: WhileStatement): CodeResult {
         bodyCode = '{}';
     }
     
+    // 移除条件中的 as! 类型断言，避免 Swift 解析错误
+    const cleanCondition = condition.replace(/\s+as!\s+\w+/g, '');
+    
     return {
-        code: `while ${condition} ${bodyCode}`,
+        code: `while ${cleanCondition} ${bodyCode}`,
         indentLevel: 0
     };
 }
@@ -1765,9 +1799,12 @@ function parseDoWhileStatement(statement: DoStatement): CodeResult {
         bodyCode = '{}';
     }
     
+    // 移除条件中的 as! 类型断言，避免 Swift 解析错误
+    const cleanCondition = condition.replace(/\s+as!\s+\w+/g, '');
+    
     // Swift 使用 repeat-while 语法
     return {
-        code: `repeat ${bodyCode} while ${condition}`,
+        code: `repeat ${bodyCode} while ${cleanCondition}`,
         indentLevel: 0
     };
 }
@@ -2042,6 +2079,12 @@ function parseExpression(expression?: Expression): CodeResult {
         } else if (operator === 'instanceof') {
             // instanceof 检查
             return {code: `${left} is ${right}`};
+        }
+        
+        // 如果左边或右边包含 getTypeName 调用（来自 typeof），使用 == 而不是 ===
+        if ((operator === '===' || operator === '==') && 
+            (left.includes('getTypeName') || right.includes('getTypeName'))) {
+            swiftOperator = '==';
         }
 
         return {code: `${left} ${swiftOperator} ${right}`};
