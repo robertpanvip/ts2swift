@@ -86,9 +86,75 @@ if (args.length > 0) {
 let objectLiteralCounter = 0;
 // 存储匿名类定义
 let anonymousClasses: string[] = [];
+// 存储 interface 的定义信息
+const interfaceDefinitions: Map<string, {name: string, properties: {name: string, type: string}[]}> = new Map();
+
+// 存储变量定义处的类型（用于检测类型收窄）
+// Map<变量名，定义处的 Type 对象>
+const typeDefinitions: Map<string, Type> = new Map();
+
+// 辅助函数：检查是否需要类型收窄转换
+// 如果变量使用处的类型与定义处的类型不一致，返回需要转换的目标类型
+function checkTypeNarrowing(identifier: any, currentType: Type): string | null {
+    const name = identifier.getText();
+    
+    // 获取定义
+    const checker = identifier.getProject().getTypeChecker();
+    const symbol = checker.getSymbolAtLocation(identifier);
+    
+    if (!symbol) return null;
+    
+    // 获取定义的声明
+    const declarations = symbol.getDeclarations();
+    if (!declarations || declarations.length === 0) return null;
+    
+    const decl = declarations[0];
+    
+    // 获取定义处的类型（直接从声明的 type 属性获取）
+    let defType: Type | null = null;
+    
+    if (Node.isVariableDeclaration(decl)) {
+        // 优先使用显式类型注解
+        const typeNode = decl.getTypeNode();
+        if (typeNode) {
+            defType = typeNode.getType();
+        } else {
+            // 没有显式类型注解，使用初始化表达式的类型
+            const initializer = decl.getInitializer();
+            if (initializer) {
+                defType = initializer.getType();
+            }
+        }
+    } else if (Node.isPropertySignature(decl)) {
+        // 使用属性声明的类型
+        defType = decl.getType();
+    } else if (Node.isParameterDeclaration(decl)) {
+        // 使用参数声明的类型
+        const typeNode = decl.getTypeNode();
+        if (typeNode) {
+            defType = typeNode.getType();
+        }
+    }
+    
+    // 如果没有获取到定义处的类型，返回 null
+    if (!defType) return null;
+    
+    // 比较类型的文本表示
+    const defTypeText = defType.getText();
+    const currentTypeText = currentType.getText();
+    
+    // 如果类型不一致，说明收窄了，返回当前类型用于转换
+    if (defTypeText && defTypeText !== currentTypeText) {
+        return parseType(currentType);
+    }
+    
+    return null;
+}
 
 // 处理对象字面量，返回类名
-function processObjectLiteral(expression: any): string {
+// interfaceType: 如果有显式类型注解（如 interface），传递类型名以生成包含所有属性的类
+// interfaceProperties: interface 中定义的所有属性 [{name, type}, ...]
+function processObjectLiteral(expression: any, interfaceType?: string, interfaceProperties?: {name: string, type: string}[]): string {
     // 检查是否有计算属性名（如 [Symbol()]）
     const hasComputedProperty = expression.getProperties().some((property: any) => {
         // 简单检查：如果属性名以 '[' 开头，则是计算属性
@@ -101,79 +167,120 @@ function processObjectLiteral(expression: any): string {
         return 'Object()';
     }
     
-    // 生成属性声明（使用可选类型，以便在 super.init() 之后赋值）
-    const properties = expression.getProperties().map((property: any) => {
-        if (Node.isPropertyAssignment(property)) {
-            const propName = property.getName();
-            const initializer = property.getInitializer();
-            let propType = 'Any';
+    // 如果有 interfaceProperties，使用 interface 中定义的所有属性
+    // 否则只使用对象字面量中实际存在的属性
+    const propertiesToUse = interfaceProperties && interfaceProperties.length > 0 
+        ? interfaceProperties
+        : expression.getProperties().map((p: any) => ({
+            name: p.getName(),
+            type: 'Any'
+        }));
+    
+    // 生成属性声明（使用 interface 中定义的类型）
+    const properties = propertiesToUse.map((propInfo: {name: string, type: string}) => {
+        const propName = propInfo.name;
+        let propType = propInfo.type; // 使用 interface 中定义的类型
+        
+        // 如果有 interfaceType，使用 interface 的类型
+        if (interfaceType) {
+            return { code: `public var ${propName}: ${propType}`, indentLevel: 1 };
+        } else {
+            // 匿名对象根据实际值推导类型
+            const property = expression.getProperties().find((p: any) => {
+                if (Node.isPropertyAssignment(p)) {
+                    return p.getName() === propName;
+                }
+                return false;
+            });
             
-            // 推导属性类型
-            if (Node.isObjectLiteralExpression(initializer)) {
-                propType = 'Object';
-            } else if (Node.isStringLiteral(initializer)) {
-                propType = 'String';
-            } else if (Node.isNumericLiteral(initializer)) {
-                propType = 'Number';
-            } else if (initializer?.getKindName() === 'TrueKeyword' || initializer?.getKindName() === 'FalseKeyword') {
-                propType = 'Bool';
+            if (property && Node.isPropertyAssignment(property)) {
+                const initializer = property.getInitializer();
+                if (Node.isStringLiteral(initializer)) {
+                    propType = 'String';
+                } else if (Node.isNumericLiteral(initializer)) {
+                    propType = 'Number';
+                } else if (initializer?.getKindName() === 'TrueKeyword' || initializer?.getKindName() === 'FalseKeyword') {
+                    propType = 'Bool';
+                } else if (Node.isObjectLiteralExpression(initializer)) {
+                    propType = 'Object';
+                } else if (Node.isArrayLiteralExpression(initializer)) {
+                    propType = 'Array';
+                }
             }
-            
-            // 使用可选类型（Type?），这样可以在 super.init() 后初始化
             return { code: `public var ${propName}: ${propType}?`, indentLevel: 1 };
         }
-        return null;
-    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
+    });
     
-    // 生成 init 参数
-    const initParams = expression.getProperties().map((property: any) => {
-        if (Node.isPropertyAssignment(property)) {
-            const propName = property.getName();
-            const initializer = property.getInitializer();
-            let propType = 'Any';
-            
-            // 推导参数类型
-            if (Node.isObjectLiteralExpression(initializer)) {
-                propType = 'Object';
-            } else if (Node.isStringLiteral(initializer)) {
-                propType = 'String';
-            } else if (Node.isNumericLiteral(initializer)) {
-                propType = 'Number';
-            } else if (initializer?.getKindName() === 'TrueKeyword' || initializer?.getKindName() === 'FalseKeyword') {
-                propType = 'Bool';
-            }
-            
+    const className = interfaceType ? `${interfaceType}Impl` : `AnonymousObject_${objectLiteralCounter++}`;
+    
+    // 如果有 interfaceType，需要让类继承 Object 并实现 protocol
+    // 否则只继承 Object
+    const inheritsStr = interfaceType ? `: Object, ${interfaceType}` : `: Object`;
+    
+    // 如果是匿名对象但有 interfaceType，也需要实现 protocol
+    let finalInheritsStr = inheritsStr;
+    if (!interfaceType && interfaceProperties && interfaceProperties.length > 0) {
+        // 匿名对象但实现了 interface 的属性，添加 protocol 实现
+        finalInheritsStr = `: Object, ${interfaceProperties.map(p => p.type.replace('?', '')).join(', ')}`;
+    }
+    
+    // 如果有 interfaceType，不需要调用 super.init()，也不需要 properties 字典
+    const needsSuperInit = !interfaceType;
+    
+    // 生成 init 参数（使用 interface 中定义的类型）
+    const initParams = propertiesToUse.map((propInfo: {name: string, type: string}) => {
+        const propName = propInfo.name;
+        let propType = propInfo.type; // 使用 interface 中定义的类型
+        
+        // 如果有 interfaceType，使用 interface 的类型
+        if (interfaceType) {
             return `${propName}: ${propType}`;
+        } else {
+            // 匿名对象根据实际值推导类型
+            const property = expression.getProperties().find((p: any) => {
+                if (Node.isPropertyAssignment(p)) {
+                    return p.getName() === propName;
+                }
+                return false;
+            });
+            
+            if (property && Node.isPropertyAssignment(property)) {
+                const initializer = property.getInitializer();
+                if (Node.isStringLiteral(initializer)) {
+                    propType = 'String';
+                } else if (Node.isNumericLiteral(initializer)) {
+                    propType = 'Number';
+                } else if (initializer?.getKindName() === 'TrueKeyword' || initializer?.getKindName() === 'FalseKeyword') {
+                    propType = 'Bool';
+                } else if (Node.isObjectLiteralExpression(initializer)) {
+                    propType = 'Object';
+                } else if (Node.isArrayLiteralExpression(initializer)) {
+                    propType = 'Array';
+                }
+            }
+            return `${propName}: ${propType}?`;
         }
-        return '';
-    }).filter(Boolean).join(', ');
+    }).join(', ');
     
-    // 生成 init 方法体
-    const initAssignments = expression.getProperties().map((property: any) => {
-        if (Node.isPropertyAssignment(property)) {
-            const propName = property.getName();
-            return { code: `self.${propName} = ${propName}`, indentLevel: 1 };
-        }
-        return null;
-    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
+    // 生成 init 方法体：同时赋值属性字段和 properties 字典
+    const initAssignments = propertiesToUse.map((propInfo: {name: string, type: string}) => {
+        const propName = propInfo.name;
+        return { code: `self.${propName} = ${propName}`, indentLevel: 1 };
+    });
     
-    const propertiesAssignments = expression.getProperties().map((property: any) => {
-        if (Node.isPropertyAssignment(property)) {
-            const propName = property.getName();
-            return { code: `self.properties["${propName}"] = ${propName}`, indentLevel: 1 };
-        }
-        return null;
-    }).filter((r: CodeResult | null) => r !== null) as CodeResult[];
-    
-    const className = `AnonymousObject_${objectLiteralCounter++}`;
+    // 只有非 interfaceType 才需要 properties 字典
+    const propertiesAssignments = needsSuperInit ? propertiesToUse.map((propInfo: {name: string, type: string}) => {
+        const propName = propInfo.name;
+        return { code: `self.properties["${propName}"] = ${propName}`, indentLevel: 1 };
+    }) : [];
     
     // 合并 init 方法体
-    const initBodyStatements = [{ code: 'super.init()', indentLevel: 1 }, ...initAssignments, ...propertiesAssignments];
+    const initBodyStatements = needsSuperInit ? [{ code: 'super.init()', indentLevel: 1 }, ...initAssignments, ...propertiesAssignments] : initAssignments;
     const initBody = mergeCodeResults(initBodyStatements, { baseIndent: 0, joinWith: '\n' });
     
     // 构建 class 定义
     const classParts = [
-        { code: 'class ' + className + ': Object {', indentLevel: 0 },
+        { code: 'class ' + className + finalInheritsStr + ' {', indentLevel: 0 },
         ...properties,
         { code: '', indentLevel: 0 }, // 空行
         { code: `init(${initParams}) {`, indentLevel: 0 },
@@ -186,22 +293,44 @@ function processObjectLiteral(expression: any): string {
     anonymousClasses.push(classDef);
     
     // 生成初始化参数
-    const initArgs = expression.getProperties().map((property: any) => {
-        if (Node.isPropertyAssignment(property)) {
-            const propName = property.getName();
+    const initArgs = propertiesToUse.map((propInfo: {name: string, type: string}) => {
+        const propName = propInfo.name;
+        // 查找对象字面量中是否有这个属性
+        const property = expression.getProperties().find((p: any) => {
+            if (Node.isPropertyAssignment(p)) {
+                return p.getName() === propName;
+            }
+            return false;
+        });
+        
+        if (property && Node.isPropertyAssignment(property)) {
             const initializer = property.getInitializer();
             let propValue = '';
             
             if (Node.isObjectLiteralExpression(initializer)) {
-                propValue = processObjectLiteral(initializer);
+                // 检查属性类型是否是 Interface（如 Address?）
+                const propTypeBase = propInfo.type.replace('?', '');
+                // 从 Map 中获取 interface 的属性信息
+                const nestedInterfaceProps = interfaceDefinitions.get(propTypeBase);
+                
+                // 递归处理嵌套对象字面量，传递 interface 信息
+                propValue = processObjectLiteral(initializer, nestedInterfaceProps ? propTypeBase : undefined, nestedInterfaceProps ? nestedInterfaceProps.properties : undefined);
             } else {
                 propValue = parseExpression(initializer).code;
             }
             
             return `${propName}: ${propValue}`;
+        } else {
+            // 属性未在对象字面量中定义
+            // 如果是可选类型（Type?），使用 nil
+            // 否则使用 Undefined()
+            if (propInfo.type.endsWith('?')) {
+                return `${propName}: nil`;
+            } else {
+                return `${propName}: Undefined()`;
+            }
         }
-        return '';
-    }).filter(Boolean).join(', ');
+    }).join(', ');
     
     return `${className}(${initArgs})`;
 }
@@ -526,6 +655,8 @@ function generateSwiftCode(sourceFile: SourceFile, fileName: string): string {
             }).join('\n');
             moduleCode += `${indentedStatements}\n`;
         }
+        // 最后启动事件循环执行微任务和宏任务
+        moduleCode += `        \n        // 启动事件循环执行所有异步任务\n        EventLoop.shared.run(timeout: 1.0)\n`;
         moduleCode += `    }\n`;
         
         moduleCode += `}\n`;
@@ -616,15 +747,52 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
         let shouldOmitType = false;
 
         if (initializer) {
+            // 解析初始化表达式
+            initializerCode = parseExpression(initializer).code;
+            
+            // 检查初始化表达式是否包含可选链（?.）
+            const initializerText = initializer.getFullText();
+            const hasOptionalChain = initializerText.includes('?.');
+            
+            // 如果包含可选链，需要在表达式后添加 ?? 转换
+            // TypeScript 可能收窄了类型，但运行时返回的是可选类型
+            // 使用 ?? 提供默认值（nil），让变量类型自动推断为可选
+            if (hasOptionalChain && !typeNode && typeStr !== 'Any' && !typeStr.endsWith('?')) {
+                // 使用可选绑定，如果值为 nil 则使用 nil（自动推断为可选类型）
+                initializerCode = `${initializerCode}`;
+                // 将类型改为可选类型
+                if (!finalTypeStr.endsWith('?')) {
+                    finalTypeStr = `${typeStr}?`;
+                }
+            }
+            
             // 检查初始化表达式是否是对象字面量
             const isObjectLiteral = Node.isObjectLiteralExpression(initializer);
             
             if (isObjectLiteral) {
-                // 生成匿名类（递归处理嵌套对象）
-                const initializerCodeFromLiteral = processObjectLiteral(initializer);
-                initializerCode = initializerCodeFromLiteral;
-                // 省略类型注解，让 Swift 自动推断为匿名类类型
-                shouldOmitType = true;
+                // 检查是否有显式类型注解（如 interface 或 class）
+                const hasExplicitType = typeNode !== undefined;
+                
+                if (hasExplicitType) {
+                    // 有显式类型注解，使用 interface/class 类型生成类
+                    // 生成实现类（如 PersonImpl）
+                    const implClassName = typeStr + 'Impl';
+                    finalTypeStr = typeStr;
+                    
+                    // 从 Map 中获取 interface 的属性信息
+                    const interfaceProps = interfaceDefinitions.get(typeStr);
+                    
+                    // 生成实现类（从 interface 获取所有属性）
+                    const initializerCodeFromLiteral = processObjectLiteral(initializer, typeStr, interfaceProps ? interfaceProps.properties : undefined);
+                    initializerCode = initializerCodeFromLiteral;
+                } else {
+                    // 无类型注解，生成 AnonymousObject_*
+                    // 生成匿名类（递归处理嵌套对象）
+                    const initializerCodeFromLiteral = processObjectLiteral(initializer);
+                    initializerCode = initializerCodeFromLiteral;
+                    // 省略类型注解，让 Swift 自动推断为匿名类类型
+                    shouldOmitType = true;
+                }
             } else if (Node.isNewExpression(initializer)) {
                 // new 表达式，使用类名作为类型
                 initializerCode = parseExpression(initializer).code;
@@ -633,8 +801,22 @@ function parseVariableStatement(statement: VariableStatement): CodeResult {
                 finalTypeStr = className;
             } else if (Node.isCallExpression(initializer)) {
                 // CallExpression（如 Symbol()），让 Swift 推断类型
-                initializerCode = parseExpression(initializer).code;
-                shouldOmitType = true;
+                // 但 Promise 相关调用需要保留类型注解
+                const callExpr = initializer as CallExpression;
+                const expr = callExpr.getExpression();
+                const exprText = expr.getText();
+                
+                // 检查是否是 Promise 相关的调用
+                const isPromiseCall = exprText.includes('Promise.') || exprText.startsWith('Promise');
+                
+                if (isPromiseCall) {
+                    // Promise 调用，保留类型注解
+                    initializerCode = parseExpression(initializer).code;
+                } else {
+                    // 其他调用，省略类型注解
+                    initializerCode = parseExpression(initializer).code;
+                    shouldOmitType = true;
+                }
             } else {
                 initializerCode = parseExpression(initializer).code;
             }
@@ -776,12 +958,139 @@ function parseArrayDestructuring(declaration: VariableDeclaration, declarationKi
     return declarations.join('\n');
 }
 
+// 辅助函数：转换 async 函数体（使用 Babel 风格的状态机）
+function transformAsyncBody(body: Block, returnTypeStr: string): string {
+    const statements = body.getStatements();
+    
+    // 收集所有 await 表达式
+    const awaitExpressions: any[] = [];
+    const statementInfos: { stmt: any; awaitIndex: number[] }[] = [];
+    
+    // 遍历语句，记录每个语句中的 await 位置
+    for (const stmt of statements) {
+        const awaitIndices: number[] = [];
+        // 使用 forEachDescendant 遍历所有后代节点
+        stmt.forEachDescendant(child => {
+            if (child.getKind() === ts.SyntaxKind.AwaitExpression) {
+                awaitIndices.push(awaitExpressions.length);
+                awaitExpressions.push(child);
+            }
+        });
+        statementInfos.push({ stmt, awaitIndex: awaitIndices });
+    }
+    
+    // 如果没有 await，直接包装返回值
+    if (awaitExpressions.length === 0) {
+        // 检查是否是 return 语句
+        if (statements.length === 1 && Node.isReturnStatement(statements[0])) {
+            const returnStmt = statements[0] as ReturnStatement;
+            const expr = returnStmt.getExpression();
+            if (expr) {
+                const exprCode = parseExpression(expr).code;
+                return `{\n    return Promise<Any>.resolve(${exprCode})\n}`;
+            } else {
+                return `{\n    return Promise<Any>.resolve(())\n}`;
+            }
+        }
+        
+        // 其他语句，照搬
+        const stmts = statements
+            .map(statement => parseStatement(statement).code)
+            .join('\n');
+        const indentedStmts = stmts.split('\n').map(line => '    ' + line).join('\n');
+        return `{\n${indentedStmts}\n}`;
+    }
+    
+    // 有 await，使用 Promise 链式调用
+    // 构建一个简化的状态机
+    let chainCode = 'return ';
+    
+    // 从第一个语句开始构建 Promise 链
+    chainCode += buildPromiseChain(statementInfos, 0, 'undefined');
+    
+    return `{\n    ${chainCode}\n}`;
+}
+
+// 辅助函数：构建 Promise 链
+function buildPromiseChain(statementInfos: any[], stmtIndex: number, prevValue: string, indentLevel: number = 0): string {
+    const indent = '    '.repeat(indentLevel);
+    const nextIndent = '    '.repeat(indentLevel + 1);
+    
+    if (stmtIndex >= statementInfos.length) {
+        // 所有语句处理完毕，返回 Promise.resolve()
+        return `${indent}Promise<Any>.resolve(())`;
+    }
+    
+    const { stmt, awaitIndex } = statementInfos[stmtIndex];
+    const stmtCode = parseStatement(stmt).code;
+    
+    // 如果语句中没有 await，直接执行并继续下一个
+    if (awaitIndex.length === 0) {
+        const nextChain = buildPromiseChain(statementInfos, stmtIndex + 1, 'undefined', indentLevel + 1);
+        return `${indent}Promise<Any>.resolve(()).then(onFulfilled: { _ in\n${nextIndent}${stmtCode}\n${nextChain}\n${indent}})`;
+    }
+    
+    // 有 await，需要转换为 then 链
+    // 简化处理：只处理单个 await 的情况
+    if (awaitIndex.length === 1) {
+        // 处理 const x = await fn() 这种情况
+        if (Node.isVariableStatement(stmt)) {
+            const varStmt = stmt as VariableStatement;
+            const declarations = varStmt.getDeclarationList().getDeclarations();
+            if (declarations.length > 0) {
+                const decl = declarations[0];
+                const varName = decl.getName();
+                const initializer = decl.getInitializer();
+                
+                if (initializer && initializer.getKind() === ts.SyntaxKind.AwaitExpression) {
+                    const awaitExprAny = initializer as any;
+                    const promiseExpr = awaitExprAny.getExpression ? awaitExprAny.getExpression() : null;
+                    const promiseCode = parseExpression(promiseExpr).code;
+                    
+                    // 转换为：promise.then(x => { 下一个语句 })
+                    const nextChain = buildPromiseChain(statementInfos, stmtIndex + 1, varName, indentLevel + 1);
+                    return `${indent}${promiseCode}.then(onFulfilled: { ${varName} in\n${nextChain}\n${indent}})`;
+                }
+            }
+        }
+        
+        // 其他情况：await 在非变量声明语句中
+        // 找到语句中的第一个 await 表达式
+        let firstAwaitExpr: any = null;
+        stmt.forEachDescendant(child => {
+            if (!firstAwaitExpr && child.getKind() === ts.SyntaxKind.AwaitExpression) {
+                firstAwaitExpr = child;
+            }
+        });
+        
+        if (firstAwaitExpr) {
+            const expr = firstAwaitExpr.getExpression ? firstAwaitExpr.getExpression() : null;
+            const exprCode = parseExpression(expr).code;
+            
+            const nextChain = buildPromiseChain(statementInfos, stmtIndex + 1, 'undefined', indentLevel + 1);
+            return `${indent}${exprCode}.then(onFulfilled: { _ in\n${nextIndent}${stmtCode}\n${nextChain}\n${indent}})`;
+        }
+        
+        // 如果没有找到 await 表达式，直接执行语句
+        const nextChain = buildPromiseChain(statementInfos, stmtIndex + 1, 'undefined', indentLevel + 1);
+        return `${indent}Promise<Any>.resolve(()).then(onFulfilled: { _ in\n${nextIndent}${stmtCode}\n${nextChain}\n${indent}})`;
+    }
+    
+    // 多个 await 的复杂情况，使用简化处理
+    const stmts = statementInfos.slice(stmtIndex)
+        .map(info => parseStatement(info.stmt).code)
+        .join(`\n${nextIndent}`);
+    
+    return `${indent}Promise<Any>.resolve(()).then(onFulfilled: { _ in\n${nextIndent}${stmts}\n${nextIndent}return Promise<Any>.resolve(())\n${indent}})`;
+}
+
 function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
     const isExport = statement.hasModifier(ts.SyntaxKind.ExportKeyword);
     const isDefault = statement.hasModifier(ts.SyntaxKind.DefaultKeyword);
+    const isAsync = statement.hasModifier(ts.SyntaxKind.AsyncKeyword);
     const name = statement.getName() || '';
     
-    console.log(`parseFunctionDeclaration: ${name}, isExport=${isExport}, isDefault=${isDefault}`);
+    console.log(`parseFunctionDeclaration: ${name}, isExport=${isExport}, isDefault=${isDefault}, isAsync=${isAsync}`);
     
     const parameters = statement.getParameters();
     const returnType = statement.getReturnType();
@@ -811,16 +1120,59 @@ function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
         return `_ ${paramName}: ${paramType}`;
     }).join(', ');
 
-    const returnTypeStr = parseType(returnType);
+    // 获取返回类型字符串
+    let returnTypeStr = parseType(returnType);
+    
+    // 如果 returnTypeStr 是 Promise 但没有泛型参数，尝试从类型注解中获取
+    if (returnTypeStr === 'Promise') {
+        // 尝试从返回类型注解中获取泛型参数
+        const returnTypeNode = statement.getReturnTypeNode();
+        if (returnTypeNode) {
+            const returnTypeText = returnTypeNode.getText();
+            if (returnTypeText.startsWith('Promise<') && returnTypeText.endsWith('>')) {
+                // 提取泛型参数
+                const genericParam = returnTypeText.substring(8, returnTypeText.length - 1);
+                // 转换基本类型
+                if (genericParam === 'string') returnTypeStr = 'Promise<String>';
+                else if (genericParam === 'number') returnTypeStr = 'Promise<Number>';
+                else if (genericParam === 'boolean') returnTypeStr = 'Promise<Bool>';
+                else if (genericParam === 'void') returnTypeStr = 'Promise<Void>';
+                else if (genericParam === 'any') returnTypeStr = 'Promise<Any>';
+                else returnTypeStr = `Promise<${genericParam}>`;
+            }
+        }
+    }
+    
+    // 处理 async 函数的返回类型
+    if (isAsync) {
+        // async 函数返回 Promise<T>，转换为 Promise<T>
+        // 如果 returnTypeStr 已经是 Promise<...>，不需要处理
+        // 否则需要包装
+        // 使用 Promise<Any> 而不是 Promise<Void> 以避免类型推断问题
+        if (returnTypeStr === 'Void') {
+            returnTypeStr = 'Promise<Any>';
+        } else if (!returnTypeStr.startsWith('Promise')) {
+            returnTypeStr = `Promise<${returnTypeStr}>`;
+        } else {
+            // 如果已经是 Promise 类型，将泛型参数改为 Any
+            returnTypeStr = 'Promise<Any>';
+        }
+    }
+    
     let bodyStr = '{}';
     if (body) {
-        // 直接获取块内的语句，不添加外层花括号
-        const statements = (body as Block).getStatements()
-            .map(statement => parseStatement(statement).code)
-            .join('\n');
-        // 为每一行添加 4 个空格的缩进（函数体内的缩进）
-        const indentedStatements = statements.split('\n').map(line => '    ' + line).join('\n');
-        bodyStr = `{\n${indentedStatements}\n}`;
+        if (isAsync) {
+            // async 函数，需要转换函数体
+            bodyStr = transformAsyncBody(body as Block, returnTypeStr);
+        } else {
+            // 直接获取块内的语句，不添加外层花括号
+            const statements = (body as Block).getStatements()
+                .map(statement => parseStatement(statement).code)
+                .join('\n');
+            // 为每一行添加 4 个空格的缩进（函数体内的缩进）
+            const indentedStatements = statements.split('\n').map(line => '    ' + line).join('\n');
+            bodyStr = `{\n${indentedStatements}\n}`;
+        }
     }
     
     // 当返回类型是 void 时，不添加返回类型
@@ -829,6 +1181,8 @@ function parseFunctionDeclaration(statement: FunctionDeclaration): CodeResult {
     // 如果是默认导出，添加特殊标记
     const defaultMarker = isDefault ? ' // DEFAULT_EXPORT' : '';
     
+    // async 函数返回 Promise，不需要额外的 async 关键字
+    // TypeScript 的 async 编译后就是返回 Promise 的普通函数
     return {
         code: `${isExport ? 'public ' : ''}func ${name}${genericStr}(${params}) ${returnTypePart} ${bodyStr}${defaultMarker}`
     };
@@ -1008,12 +1362,41 @@ function parseInterfaceDeclaration(statement: InterfaceDeclaration): CodeResult 
 
     let properties: string[] = [];
     let methods: string[] = [];
+    let interfaceProperties: {name: string, type: string}[] = [];
 
     members.forEach((member: any) => {
         if (Node.isPropertySignature(member)) {
             const propName = member.getName();
-            const propType = parseType(member.getType());
-            properties.push(`var ${propName}: ${propType} { get }`);
+            // 获取类型
+            const propTypeObj = member.getType();
+            
+            // 检查是否是可选属性（通过原始文本检查问号）
+            const syntaxText = member.getText();
+            const hasQuestionToken = syntaxText.includes('?');
+            
+            // 检查是否是联合类型 T | undefined
+            const isUnionWithUndefined = propTypeObj.isUnion() && 
+                propTypeObj.getUnionTypes().some(t => t.isUndefined());
+            
+            // 获取基础类型
+            let propType = parseType(propTypeObj);
+            
+            // 如果是可选属性或联合类型 T | undefined，生成 Type?
+            if (hasQuestionToken || isUnionWithUndefined) {
+                // 如果是联合类型 T | undefined，去掉 Undefined 部分
+                if (isUnionWithUndefined && !propType.endsWith('?')) {
+                    // parseType 已经处理了联合类型，返回 T?
+                    if (!propType.endsWith('?')) {
+                        propType = `${propType}?`;
+                    }
+                } else if (!propType.endsWith('?')) {
+                    propType = `${propType}?`;
+                }
+            }
+            
+            // Protocol 属性需要同时支持 get 和 set
+            properties.push(`var ${propName}: ${propType} { get set }`);
+            interfaceProperties.push({ name: propName, type: propType });
         } else if (Node.isMethodSignature(member)) {
             const methodName = member.getName();
             const parameters = member.getParameters();
@@ -1032,8 +1415,11 @@ function parseInterfaceDeclaration(statement: InterfaceDeclaration): CodeResult 
 
     const protocolBody = [...(associatedTypes ? [associatedTypes] : []), ...properties, ...methods].join('\n    ');
 
+    // 保存 interface 的属性信息到 Map 中
+    interfaceDefinitions.set(name, { name, properties: interfaceProperties });
+
     return {
-        code: `${isExport ? 'public ' : ''}protocol ${name} {\n    ${protocolBody}\n}`
+        code: `public protocol ${name} {\n    ${protocolBody}\n}`
     };
 }
 
@@ -1540,6 +1926,15 @@ function parseExpression(expression?: Expression): CodeResult {
         return {code: 'Undefined()'};
     }
 
+    // 处理 await 表达式
+    if (expression.getKind() === ts.SyntaxKind.AwaitExpression) {
+        // await 表达式已经被 transformAsyncBody 处理为 Promise 链
+        // 这里只需要返回内部的表达式
+        const awaitExpr = expression as any;
+        const expr = awaitExpr.getExpression ? awaitExpr.getExpression() : null;
+        return parseExpression(expr);
+    }
+
     if (Node.isIdentifier(expression)) {
         const idText = expression.getText();
         if (idText === 'null') {
@@ -1547,6 +1942,16 @@ function parseExpression(expression?: Expression): CodeResult {
         } else if (idText === 'undefined') {
             return {code: 'Undefined()'};
         }
+        
+        // 检查类型收窄
+        const currentType = expression.getType();
+        const targetType = checkTypeNarrowing(expression, currentType);
+        
+        if (targetType) {
+            // 类型收窄了，添加 as! 转换
+            return {code: `${idText} as! ${targetType}`};
+        }
+        
         return {code: idText};
     } else if (expression.getKind() === ts.SyntaxKind.NullKeyword) {
         return {code: 'Null()'};
@@ -1586,6 +1991,31 @@ function parseExpression(expression?: Expression): CodeResult {
             return {code: `${operandCode} -= Number(1)`};
         }
         return {code: operandCode};
+    } else if (Node.isNonNullExpression(expression)) {
+        // 处理非空断言运算符 (!) - TypeScript 4.0+
+        // 生成运行时断言检查
+        const expr = (expression as any).getExpression();
+        const exprCode = parseExpression(expr).code;
+        
+        // 获取表达式的类型
+        const exprType = expression.getType();
+        let returnType = 'Any';
+        if (exprType.isString() || exprType.isStringLiteral()) {
+            returnType = 'String';
+        } else if (exprType.isNumber() || exprType.isNumberLiteral()) {
+            returnType = 'Number';
+        } else if (exprType.isBoolean() || exprType.isBooleanLiteral()) {
+            returnType = 'Bool';
+        }
+        
+        // 添加断言：如果值为 Undefined，抛出错误
+        return {code: `({ () -> ${returnType} in
+    let __value = ${exprCode}
+    if __value == Undefined() {
+        fatalError("Cannot access property of undefined/null")
+    }
+    return __value as! ${returnType}
+}())`};
     } else if (Node.isBigIntLiteral(expression)) {
         // bigint 字面量（以 n 结尾），如 123n
         const literalText = expression.getText();
@@ -1605,12 +2035,10 @@ function parseExpression(expression?: Expression): CodeResult {
 
         // 处理一些特殊运算符
         let swiftOperator = operator;
-        if (operator === '===') {
-            swiftOperator = '==';
-        } else if (operator === '!==') {
-            swiftOperator = '!=';
-        } else if (operator === '??') {
-            swiftOperator = '??';
+        if (operator === '??') {
+            // 空值合并运算符，直接使用 Swift 的 ??
+            // TypeScript 会保证类型安全
+            return {code: `${left} ?? ${right}`};
         } else if (operator === 'instanceof') {
             // instanceof 检查
             return {code: `${left} is ${right}`};
@@ -1627,6 +2055,33 @@ function parseExpression(expression?: Expression): CodeResult {
             const pattern = argsList.length > 0 ? parseExpression(argsList[0] as Expression).code : '""';
             const flags = argsList.length > 1 ? parseExpression(argsList[1] as Expression).code : '""';
             return {code: `RegExp(${pattern}, flags: ${flags})`};
+        }
+        
+        // 特殊处理 Promise 构造函数，保留泛型参数
+        if (expressionPart.startsWith('Promise')) {
+            // 获取泛型参数
+            const typeArgs = (expression as any).getTypeArguments ? (expression as any).getTypeArguments() : [];
+            let genericParams = '';
+            if (typeArgs && typeArgs.length > 0) {
+                // 尝试获取类型的文本表示
+                const typeArgCodes = typeArgs.map((t: any) => {
+                    // 尝试使用 getText() 方法
+                    if (t.getText) {
+                        const text = t.getText();
+                        // 转换为 Swift 类型
+                        if (text === 'string') return 'String';
+                        if (text === 'number') return 'Number';
+                        if (text === 'boolean') return 'Bool';
+                        if (text === 'void') return 'Void';
+                        return text;
+                    }
+                    return 'Any';
+                }).join(', ');
+                genericParams = `<${typeArgCodes}>`;
+            }
+            const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+            // 使用泛型参数
+            return {code: `Promise${genericParams}(${args})`};
         }
         
         const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
@@ -1666,6 +2121,23 @@ function parseExpression(expression?: Expression): CodeResult {
     } else if (Node.isCallExpression(expression)) {
         const callee = expression.getExpression();
         const argsList = expression.getArguments();
+        
+        // 处理字符串方法调用
+        if (Node.isPropertyAccessExpression(callee)) {
+            const methodName = callee.getName();
+            const obj = callee.getExpression();
+            const objType = obj.getType();
+            
+            // 如果是字符串方法，转换为 Swift 方法
+            if (objType.isString() || objType.isStringLiteral()) {
+                const objCode = parseExpression(obj).code;
+                if (methodName === 'toUpperCase') {
+                    return {code: `(${objCode}).uppercased()`};
+                } else if (methodName === 'toLowerCase') {
+                    return {code: `(${objCode}).lowercased()`};
+                }
+            }
+        }
         
         // 检测是否是数组方法调用
         if (Node.isPropertyAccessExpression(callee)) {
@@ -1729,6 +2201,108 @@ function parseExpression(expression?: Expression): CodeResult {
             return {code: `CreateSymbol(${args})`};
         }
         
+        // 处理 setTimeout 调用（保持与 TypeScript 一致的参数顺序）
+        if (calleeCode === 'setTimeout') {
+            const [callback, delay] = argsList;
+            const callbackCode = parseExpression(callback as Expression).code;
+            const delayCode = parseExpression(delay as Expression).code;
+            // 将 Number 转换为 TimeInterval (Double)
+            let delayValue = delayCode;
+            if (delayCode && delayCode.startsWith('Number(')) {
+                delayValue = `${delayCode}.value`;
+            }
+            return {code: `setTimeout(${callbackCode}, ${delayValue})`};
+        }
+        
+        // 处理 queueMicrotask 调用
+        if (calleeCode === 'queueMicrotask') {
+            const [task] = argsList;
+            const taskCode = parseExpression(task as Expression).code;
+            return {code: `queueMicrotask(${taskCode})`};
+        }
+        
+        // 处理 Promise 静态方法调用
+        if (calleeCode === 'Promise.resolve' || calleeCode === 'Promise.reject' || 
+            calleeCode === 'Promise.all' || calleeCode === 'Promise.race') {
+            const methodName = calleeCode.split('.')[1];
+            const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+            
+            // 对于 Promise.all 和 Promise.race，需要保留泛型参数
+            if (methodName === 'all' || methodName === 'race') {
+                // 获取泛型参数（如果有）
+                const typeArgs = (expression as any).getTypeArguments ? (expression as any).getTypeArguments() : [];
+                if (typeArgs && typeArgs.length > 0) {
+                    const typeArgCodes = typeArgs.map((t: any) => {
+                        if (t.getText) {
+                            const text = t.getText();
+                            if (text === 'void') return 'Void';
+                            if (text === 'string') return 'String';
+                            if (text === 'number') return 'Number';
+                            if (text === 'boolean') return 'Bool';
+                            return text;
+                        }
+                        return 'Any';
+                    }).join(', ');
+                    return {code: `Promise.${methodName}<${typeArgCodes}>(${args})`};
+                }
+            }
+            
+            // 对于无参数的 Promise.resolve()，使用 resolved() 避免重载冲突
+            if (methodName === 'resolve' && args.length === 0) {
+                return {code: `Promise<Void>.resolved()`};
+            }
+            
+            return {code: `Promise.${methodName}(${args})`};
+        }
+        
+        // 处理 Promise.then 调用
+        if (Node.isPropertyAccessExpression(callee)) {
+            const methodName = callee.getName();
+            const objCode = parseExpression(callee.getExpression()).code;
+            
+            if (methodName === 'then') {
+                // TypeScript: promise.then(onFulfilled, onRejected)
+                // Swift: promise.then(onFulfilled: { ... }, onRejected: { ... })
+                const [onFulfilled, onRejected] = argsList;
+                let thenCode = `${objCode}.then(`;
+                let hasOnFulfilled = false;
+                let hasOnRejected = false;
+                
+                if (onFulfilled) {
+                    const onFulfilledCode = parseExpression(onFulfilled as Expression).code;
+                    thenCode += `onFulfilled: ${onFulfilledCode}`;
+                    hasOnFulfilled = true;
+                }
+                
+                if (onRejected) {
+                    if (hasOnFulfilled) {
+                        thenCode += `, `;
+                    }
+                    const onRejectedCode = parseExpression(onRejected as Expression).code;
+                    thenCode += `onRejected: ${onRejectedCode}`;
+                    hasOnRejected = true;
+                }
+                
+                thenCode += ')';
+                return {code: thenCode};
+            }
+            
+            if (methodName === 'catchVoid') {
+                const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+                return {code: `${objCode}.catchVoid(${args})`};
+            }
+            
+            if (methodName === 'finally') {
+                const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+                return {code: `${objCode}.finally(${args})`};
+            }
+            
+            if (methodName === 'catch') {
+                const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
+                return {code: `${objCode}.catch(${args})`};
+            }
+        }
+        
         // 处理函数调用，不使用参数标签（Swift 5.3+ 支持省略参数标签）
         const args = argsList.map(arg => parseExpression(arg as Expression).code).join(', ');
         return {code: `${calleeCode}(${args})`};
@@ -1749,27 +2323,49 @@ function parseExpression(expression?: Expression): CodeResult {
             }
         }
         
-        // 对于 Any 类型的属性访问，添加类型转换
-        // 但是 console、window、字符串和数组对象是有明确类型的，不需要转换
-        // 检查是否为数组类型：如果对象是标识符且属性是数组方法，或者对象是数组字面量
-        const arrayMethods = ['map', 'filter', 'reduce', 'find', 'sort', 'push', 'pop', 'shift', 'unshift', 'slice', 'splice', 'join', 'reverse', 'forEach'];
-        const stringProperties = ['length', 'charAt', 'substring', 'indexOf', 'split', 'replace', 'toUpperCase', 'toLowerCase', 'trim'];
+        // 检查是否是可选链访问（?.）
+        // 通过检查源代码文本是否包含 ?.
+        const syntaxText = expression.getFullText();
+        const isOptionalChain = syntaxText.includes('?.');
         
         // 数组 length 转换为 count
         if (property === 'length') {
-            // 检查是否是数组的 length 属性（简单判断：对象名包含 arr）
-            // 更好的方法是检查类型，但这里简单处理
+            // 如果是可选链，需要生成包装函数处理类型转换和可选
+            if (isOptionalChain) {
+                // 获取 .length 的类型（number）
+                const lengthType = expression.getType();
+                let returnType = 'Number';
+                if (lengthType.isNumber() || lengthType.isNumberLiteral()) {
+                    returnType = 'Number';
+                }
+                
+                // 生成包装函数，将 Int? 转换为 Number?
+                return {code: `({ () -> ${returnType}? in
+    if let str = ${object} {
+        return Number(str.count)
+    }
+    return nil
+}())`};
+            }
             return {code: `${object}.count`};
         }
         
-        // 如果属性是字符串或数组的方法/属性，直接返回
-        if (stringProperties.includes(property) || arrayMethods.includes(property)) {
-            return {code: `${object}.${property}`};
-        }
-        
-        // 对于对象字面量的属性访问（AnonymousObject_*），使用 ?? 提供默认值避免 Optional 包装
-        if (object.startsWith('AnonymousObject_')) {
-            return {code: `${object}.${property} ?? nil`};
+        // 对于对象字面量的属性访问（AnonymousObject_*）或可选链，直接生成 Swift 的可选链
+        if (object.startsWith('AnonymousObject_') || isOptionalChain) {
+            // 获取属性的 TypeScript 类型
+            const propTypeObj = expression.getType();
+            let returnType = 'Any';
+            if (propTypeObj.isString() || propTypeObj.isStringLiteral()) {
+                returnType = 'String';
+            } else if (propTypeObj.isNumber() || propTypeObj.isNumberLiteral()) {
+                returnType = 'Number';
+            } else if (propTypeObj.isBoolean() || propTypeObj.isBooleanLiteral()) {
+                returnType = 'Bool';
+            }
+            
+            // 直接生成 Swift 的可选链访问
+            const accessOp = isOptionalChain ? '?.' : '.';
+            return {code: `${object}${accessOp}${property} as? ${returnType}`};
         }
         
         // 使用点号访问，而不是下标
@@ -1779,13 +2375,24 @@ function parseExpression(expression?: Expression): CodeResult {
         const index = parseExpression(expression.getArgumentExpression()).code;
         return {code: `${object}[${index}]`};
     } else if (Node.isArrowFunction(expression)) {
+        const isAsync = expression.hasModifier(ts.SyntaxKind.AsyncKeyword);
         const parameters = expression.getParameters().map(param => {
             const paramName = param.getName();
             const paramType = parseType(param.getType());
+            // 添加类型注解
             return `${paramName}: ${paramType}`;
         }).join(', ');
 
-        const returnType = parseType(expression.getReturnType());
+        // 处理 async 函数的返回类型
+        let returnType = parseType(expression.getReturnType());
+        if (isAsync && !returnType.startsWith('Promise')) {
+            if (returnType === 'Void') {
+                returnType = 'Promise<Void>';
+            } else {
+                returnType = `Promise<${returnType}>`;
+            }
+        }
+        
         const body = expression.getBody();
 
         let bodyCode = '';
@@ -1799,13 +2406,16 @@ function parseExpression(expression?: Expression): CodeResult {
             bodyCode = parseExpression(body as Expression).code;
         }
 
-        return {code: `{ (${parameters}) -> ${returnType} in\n    ${bodyCode}\n}`};
+        // 添加 async 关键字（在闭包中不需要反引号）
+        // TypeScript 的 async 箭头函数编译后返回 Promise，不需要 Swift 的 async 关键字
+        const asyncKeyword = '';
+        return {code: `{ ${asyncKeyword}(${parameters}) -> ${returnType} in\n    ${bodyCode}\n}`};
     } else if (Node.isFunctionExpression(expression)) {
         // 处理函数表达式，转换为 Swift 闭包
         const parameters = expression.getParameters().map(param => {
             const paramName = param.getName();
-            const paramType = parseType(param.getType());
-            return `${paramName}: ${paramType}`;
+            // 对于某些情况（如 Promise executor），不添加类型标注，让 Swift 推断
+            return `${paramName}`;
         }).join(', ');
 
         const returnType = parseType(expression.getReturnType());
@@ -2112,12 +2722,69 @@ function parseTypeNode(typeNode: any): string {
     if (typeName === '__type') {
         return 'Any';
     }
+    // 处理泛型类型（如 Promise<void>、Array<string> 等）
+    const genericMatch = typeName.match(/^([a-zA-Z_][a-zA-Z0-9_]*)<(.+)>$/);
+    if (genericMatch) {
+        const baseTypeName = genericMatch[1];
+        const genericParams = genericMatch[2];
+        // 递归处理泛型参数，并转换基本类型
+        const processedParams = genericParams.split(',').map(param => {
+            const trimmedParam = param.trim();
+            // 转换基本类型
+            if (trimmedParam === 'string') return 'String';
+            if (trimmedParam === 'number') return 'Number';
+            if (trimmedParam === 'boolean') return 'Bool';
+            if (trimmedParam === 'void') return 'Void';
+            if (trimmedParam === 'any') return 'Any';
+            // 递归处理嵌套泛型
+            return parseTypeNode({ getText: () => trimmedParam, kind: typeNode.kind });
+        }).join(', ');
+        return `${baseTypeName}<${processedParams}>`;
+    }
+    
     // 对于类或接口，返回实际类型名
     return typeName;
 }
 
 function parseType(type: Type): string {
     try {
+        // 检查类型是否是联合类型
+        if (type.isUnion()) {
+            // 检查是否是 T | undefined 或 T | null 这种可选类型
+            const unionTypes = type.getUnionTypes();
+            if (unionTypes.length === 2) {
+                const hasUndefined = unionTypes.some(t => t.isUndefined());
+                const hasNull = unionTypes.some(t => t.isNull());
+                
+                if (hasUndefined || hasNull) {
+                    // 找到非 undefined/null 的那个类型
+                    const actualType = unionTypes.find(t => !t.isUndefined() && !t.isNull());
+                    if (actualType) {
+                        const baseType = parseType(actualType);
+                        return `${baseType}?`;
+                    }
+                }
+            }
+            // 其他联合类型返回 Any
+            return 'Any';
+        }
+        
+        // 检查是否是接口、类、数组等聚合类型
+        if (type.isObject()) {
+            // 获取类型的 symbol
+            const symbol = type.getSymbol?.() || type.getAliasSymbol?.();
+            if (symbol) {
+                // 获取类型名
+                const typeName = symbol.getName();
+                if (typeName) {
+                    // 如果是 Interface 或 Class，返回类型名
+                    return typeName;
+                }
+            }
+            // 其他对象类型返回 Any
+            return 'Any';
+        }
+        
         if (type.isNumber?.() || type.isNumberLiteral?.()) {
             return 'Number';
         } else if (type.isString?.() || type.isStringLiteral?.()) {

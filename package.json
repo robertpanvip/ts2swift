@@ -29,7 +29,10 @@
     "run-exports": "npm run ts-swift ./test/ts/exports.ts",
     "run-imports": "npm run ts-swift ./test/ts/imports.ts ./test/ts/exports.ts",
     "run-symbol": "npm run ts-swift ./test/ts/symbol.ts",
-    "run-modifiers": "npm run ts-swift ./test/ts/modifiers.ts"
+    "run-modifiers": "npm run ts-swift ./test/ts/modifiers.ts",
+    "run-union-type": "npm run ts-swift ./test/ts/union-type-test.ts",
+    "run-optional-chain": "npm run ts-swift ./test/ts/optional-chain-test.ts",
+    "run-type-narrowing": "npm run ts-swift ./test/ts/type-narrowing-test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
